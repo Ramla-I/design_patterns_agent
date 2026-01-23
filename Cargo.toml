@@ -1,0 +1,38 @@
+[package]
+name = "design_patterns_agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Rust parsing
+syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1"
+
+# LLM API
+async-openai = "0.26"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# File system operations
+walkdir = "2.5"
+
+# Configuration
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.13"
+tokio-test = "0.4"
