@@ -1,21 +1,33 @@
 # Design Patterns Agent
 
-An AI-powered Rust code analyzer that discovers invariants in Rust codebases using LLM technology.
+An AI-powered Rust tool that discovers invariants in Rust codebases and translates C2Rust output to idiomatic Rust using LLM technology.
 
 ## What It Does
 
-This tool analyzes Rust projects to automatically identify and document:
+### Invariant Analysis
+
+Analyzes Rust projects to automatically identify and document:
 
 - **State Machine Invariants**: Typestate patterns using `PhantomData` to enforce compile-time state transitions
 - **Linear Type Invariants**: Ordering requirements and capability patterns that ensure operations happen in sequence
 - **Ownership Invariants**: Lifetime and borrowing patterns that enforce memory safety
+
+### C2Rust Translation
+
+Translates mechanically-generated C2Rust code into idiomatic, safe Rust:
+
+- Iterative LLM-powered translation with build and test feedback loops
+- Clippy-based idiomaticity scoring
+- Automatic retry on build/test failures (up to configurable max)
+- Test vector validation via the `cando2` harness
+- Organized output in timestamped run directories (`runs/<model>_<timestamp>/`)
 
 ## Quick Start
 
 ### Prerequisites
 
 - Rust toolchain (1.70+)
-- OpenAI API key
+- OpenAI-compatible API key
 
 ### Installation
 
@@ -25,56 +37,60 @@ cd design_patterns_agent
 cargo build --release
 ```
 
-### Usage
+### Invariant Analysis
 
 ```bash
-# Set your OpenAI API key
 export OPENAI_API_KEY=sk-...
 
 # Analyze a Rust codebase
-cargo run --release -- /path/to/rust/project
+cargo run --release -- analyze /path/to/rust/project
 
 # Save output to a file
-cargo run --release -- /path/to/rust/project --output report.md
+cargo run --release -- analyze /path/to/rust/project --output report.md
 
 # Get JSON output
-cargo run --release -- /path/to/rust/project --format json --output report.json
+cargo run --release -- analyze /path/to/rust/project --format json --output report.json
 ```
 
-### Example Output
+### C2Rust Translation
 
-```markdown
-# Invariant Analysis Report
+```bash
+export OPENAI_API_KEY=sk-...
 
-## Summary
-- **Total invariants discovered**: 3
-- **State machine invariants**: 2
-- **Linear type invariants**: 1
-- **Ownership invariants**: 0
+# Translate all programs in a test suite directory
+cargo run --release -- translate Public-Tests/
 
-## State Machine Invariants
+# Translate a single program
+cargo run --release -- translate Public-Tests/B01_organic/bin2hex_lib
 
-### 1. FileHandle Typestate Pattern
-**Location**: `src/file.rs:45-78`
-**Description**: FileHandle uses typestate pattern to ensure files are opened before reading.
+# With options
+cargo run --release -- translate Public-Tests/ \
+  --model gpt-4 \
+  --max-retries 3 \
+  --max-lines 500 \
+  --report extra_copy.md
 
-**Evidence**:
-```rust
-pub struct FileHandle<S> {
-    path: PathBuf,
-    _state: PhantomData<S>,
-}
+# Build-only mode (skip test vectors)
+cargo run --release -- translate Public-Tests/ --skip-tests
 
-impl FileHandle<Closed> {
-    pub fn open(self) -> FileHandle<Open> { ... }
-}
-
-impl FileHandle<Open> {
-    pub fn read(&mut self) -> Result<Vec<u8>> { ... }
-}
+# Include design pattern analysis on successful translations
+cargo run --release -- translate Public-Tests/ --analyze
 ```
 
-**Explanation**: The type system prevents calling `read()` on a closed file handle.
+Translation outputs are saved to `runs/<model>_<YYYYMMDD>_<HHMMSS>/` with the structure:
+
+```
+runs/
+  gpt-4_20260216_153000/
+    bin2hex_lib/
+      translated_rust_llm/
+        lib.rs
+        Cargo.toml
+        results.json
+    bitwriter_add_lib/
+      translated_rust_llm/
+        ...
+    report.md
 ```
 
 ## Configuration
@@ -97,10 +113,12 @@ focus = ["state_machine", "linear_types", "ownership"]
 
 Use it with:
 ```bash
-cargo run -- /path/to/project --config config.toml
+cargo run -- analyze /path/to/project --config config.toml
 ```
 
 ## How It Works
+
+### Analysis Pipeline
 
 1. **Parse**: Uses `syn` to parse Rust source files and extract type definitions, functions, and traits
 2. **Navigate**: Performs top-down exploration of the module hierarchy
@@ -108,43 +126,57 @@ cargo run -- /path/to/project --config config.toml
 4. **Analyze**: Uses LLM to analyze each pattern and identify invariants
 5. **Report**: Generates a detailed report with code evidence and explanations
 
+### Translation Pipeline
+
+1. **Discover**: Walks the directory tree to find programs with `runner/` and `test_vectors/`
+2. **Collect**: Gathers source from `translated_rust/` (crat) or `dst/` (raw c2rust)
+3. **Translate**: Sends source to LLM with a system prompt targeting idiomatic, safe Rust
+4. **Build**: Compiles the translation with `cargo build --release`
+5. **Test**: Runs test vectors via the `cando2` harness (symlink-swaps the candidate library)
+6. **Feedback**: On failure, sends build errors or test diffs back to the LLM for another attempt
+7. **Score**: Runs clippy analysis and computes an idiomaticity score
+8. **Report**: Generates a per-run report with results for every program
+
 ## Architecture
 
-The tool is built with a modular architecture:
-
-- **Parser**: Rust AST extraction using `syn`
-- **Navigator**: Hierarchical codebase exploration
-- **Detectors**: Specialized invariant detectors (state machine, linear types, ownership)
-- **LLM Integration**: Async OpenAI API client
-- **Report Generator**: Markdown and JSON output
+- **CLI** (`src/cli/`): Argument parsing with `clap`, subcommands for `analyze` and `translate`
+- **Parser** (`src/parser/`): Rust AST extraction using `syn`
+- **Navigator** (`src/navigation/`): Hierarchical codebase exploration
+- **Detectors** (`src/detection/`): Specialized invariant detectors (state machine, linear types, ownership)
+- **Translation** (`src/translation/`): LLM translator, test runner, clippy analyzer, feedback formatter, report generation
+- **LLM Integration** (`src/llm/`): Async OpenAI-compatible API client behind a trait
+- **Report Generator** (`src/report/`): Markdown and JSON output for analysis reports
+- **Tools** (`tools/`): `cando`/`cando2` test harnesses, helper scripts
 
 ## Development
 
 ```bash
-# Run tests
+# Run all tests
 cargo test
 
-# Run integration tests
-cargo test --test integration_test
+# Run tests for a specific module
+cargo test translation
+cargo test parser
+cargo test detection
 
 # Check code
 cargo check
 
-# Run on the included test project
-cargo run -- test_projects/typestate_example --output test_analysis.md
+# Build for release
+cargo build --release
 ```
 
 For detailed development documentation, see [CLAUDE.md](CLAUDE.md).
 
 ## Project Status
 
-This is **Phase 1** of the Design Patterns Agent project. Current capabilities:
-
-- ✅ Invariant discovery
+- ✅ Invariant discovery (state machine, linear types, ownership)
 - ✅ Markdown and JSON reports
-- ✅ OpenAI LLM integration
-- ⏳ Pattern suggestions (Phase 2 - planned)
-- ⏳ Code refactoring assistance (Phase 2 - planned)
+- ✅ OpenAI-compatible LLM integration
+- ✅ C2Rust to idiomatic Rust translation pipeline
+- ✅ Iterative build/test feedback loop
+- ✅ Clippy idiomaticity scoring
+- ✅ Timestamped run directories for output organization
 
 ## License
 
