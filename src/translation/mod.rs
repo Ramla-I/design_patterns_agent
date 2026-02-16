@@ -5,6 +5,7 @@ mod feedback;
 mod report;
 
 pub use translator::Translator;
+// SourceType is defined in this module and used by translator
 pub use test_runner::TestRunner;
 pub use clippy::ClippyAnalyzer;
 pub use feedback::FeedbackFormatter;
@@ -16,6 +17,15 @@ use walkdir::WalkDir;
 
 use crate::cli::Config;
 use crate::llm;
+
+/// Whether the input source is Rust (C2Rust output) or raw C code
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceType {
+    /// C2Rust or CRAT translated Rust code
+    Rust,
+    /// Raw C source code (from test_case/ directory)
+    C,
+}
 
 /// Configuration for the translation pipeline
 #[derive(Debug, Clone)]
@@ -30,6 +40,8 @@ pub struct TranslationConfig {
     pub cando2_path: String,
     /// Skip running tests (only verify build succeeds)
     pub skip_tests: bool,
+    /// Force translating from C source (test_case/) even when Rust source exists
+    pub from_c: bool,
 }
 
 impl Default for TranslationConfig {
@@ -40,6 +52,7 @@ impl Default for TranslationConfig {
             analyze_patterns: false,
             cando2_path: "../../../../tools/cando2".to_string(),
             skip_tests: false,
+            from_c: false,
         }
     }
 }
@@ -53,12 +66,16 @@ pub struct ProgramInfo {
     pub collection: String,
     /// Path to the program directory
     pub path: PathBuf,
-    /// Path to the translated_rust directory
+    /// Path to the source directory (translated_rust/, dst/, or test_case/)
     pub translated_rust_path: PathBuf,
+    /// Path that the test runner should symlink-swap (may differ from translated_rust_path for C source)
+    pub test_swap_path: PathBuf,
     /// Path to the runner directory
     pub runner_path: PathBuf,
     /// Path to test vectors directory
     pub test_vectors_path: PathBuf,
+    /// Whether the source is Rust or C code
+    pub source_type: SourceType,
 }
 
 /// Main orchestrator for the translation pipeline
@@ -73,13 +90,14 @@ impl TranslationAgent {
     }
 
     /// Discover all programs in the given path that can be translated.
-    /// Prefers `translated_rust/` (crat output), falls back to `dst/<name>/` (raw c2rust).
+    /// Prefers `translated_rust/` (crat output), falls back to `dst/<name>/` (raw c2rust),
+    /// then `test_case/` (raw C source).
     pub fn discover_programs(&self, path: &Path) -> Result<Vec<ProgramInfo>> {
         let mut programs = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
         // Walk the directory looking for program directories.
-        // A program directory contains runner/ + test_vectors/ + (translated_rust/ or dst/).
+        // A program directory contains runner/ + test_vectors/ + (translated_rust/ or dst/ or test_case/).
         // min_depth=0 so we also check if `path` itself is a program directory.
         for entry in WalkDir::new(path)
             .min_depth(0)
@@ -105,6 +123,15 @@ impl TranslationAgent {
                 continue;
             }
 
+            // Skip directories that are children of already-discovered programs
+            // (e.g. src/arr_del_lib/ inside arr_del_lib/)
+            let is_nested = programs.iter().any(|p: &ProgramInfo| {
+                program_dir.starts_with(&p.path)
+            });
+            if is_nested {
+                continue;
+            }
+
             let program_name = program_dir
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -118,23 +145,26 @@ impl TranslationAgent {
                 .unwrap_or("unknown")
                 .to_string();
 
-            // Resolve source directory: prefer translated_rust/, fall back to dst/<name>/
+            // The cando2 runner always dlopen's from <program_dir>/translated_rust/target/release/.
+            // So test_swap_path must always be <program_dir>/translated_rust/.
             let translated_rust = program_dir.join("translated_rust");
             let dst_nested = program_dir.join("dst").join(&program_name);
+            let swap_path = translated_rust.clone();
 
-            let source_path = if translated_rust.join("src").join("lib.rs").exists()
+            // Find the Rust source path
+            let rust_path = if translated_rust.join("src").join("lib.rs").exists()
                 || translated_rust.join("lib.rs").exists()
             {
-                translated_rust
+                Some(translated_rust.clone())
             } else if dst_nested.join("src").join("lib.rs").exists()
                 || dst_nested.join("lib.rs").exists()
             {
-                dst_nested
+                Some(dst_nested.clone())
             } else {
                 // Try first subdirectory of dst/
                 let dst_dir = program_dir.join("dst");
+                let mut found = None;
                 if dst_dir.exists() {
-                    let mut found = None;
                     if let Ok(entries) = std::fs::read_dir(&dst_dir) {
                         for entry in entries.filter_map(|e| e.ok()) {
                             if entry.path().is_dir() && entry.path().join("lib.rs").exists() {
@@ -143,23 +173,62 @@ impl TranslationAgent {
                             }
                         }
                     }
-                    match found {
-                        Some(p) => p,
-                        None => continue,
-                    }
-                } else {
-                    continue;
                 }
+                found
             };
 
-            programs.push(ProgramInfo {
-                name: program_name,
-                collection: collection_name,
-                path: program_dir.to_path_buf(),
-                translated_rust_path: source_path,
-                runner_path,
-                test_vectors_path,
-            });
+            let test_case_dir = program_dir.join("test_case");
+            let has_c_source = test_case_dir.join("src").join("lib.c").exists();
+
+            // Resolve source directory and type.
+            // When --from-c is set, prefer test_case/ with C source.
+            // Otherwise: prefer translated_rust/, fall back to dst/<name>/, then test_case/.
+            if self.config.from_c && has_c_source {
+                // Ensure translated_rust/ exists so the symlink swap has something to rename
+                if !swap_path.exists() {
+                    let _ = std::fs::create_dir_all(&swap_path);
+                }
+                programs.push(ProgramInfo {
+                    name: program_name,
+                    collection: collection_name,
+                    path: program_dir.to_path_buf(),
+                    translated_rust_path: test_case_dir,
+                    test_swap_path: swap_path,
+                    runner_path,
+                    test_vectors_path,
+                    source_type: SourceType::C,
+                });
+                continue;
+            }
+
+            if let Some(source_path) = rust_path {
+                programs.push(ProgramInfo {
+                    name: program_name,
+                    collection: collection_name,
+                    path: program_dir.to_path_buf(),
+                    test_swap_path: swap_path,
+                    translated_rust_path: source_path,
+                    runner_path,
+                    test_vectors_path,
+                    source_type: SourceType::Rust,
+                });
+            } else if has_c_source {
+                // Fall back to C source from test_case/
+                if !swap_path.exists() {
+                    let _ = std::fs::create_dir_all(&swap_path);
+                }
+                programs.push(ProgramInfo {
+                    name: program_name,
+                    collection: collection_name,
+                    path: program_dir.to_path_buf(),
+                    translated_rust_path: test_case_dir,
+                    test_swap_path: swap_path,
+                    runner_path,
+                    test_vectors_path,
+                    source_type: SourceType::C,
+                });
+            }
+            // else: no source found, skip
         }
 
         // Sort by collection then name for consistent ordering
@@ -168,6 +237,52 @@ impl TranslationAgent {
         });
 
         Ok(programs)
+    }
+
+    /// Collect all C source code from a test_case/ directory into a single string.
+    /// Reads header files from include/ and source files from src/.
+    fn collect_c_source_code(&self, test_case_dir: &Path) -> Result<String> {
+        let mut parts = Vec::new();
+
+        // Read header files from include/
+        let include_dir = test_case_dir.join("include");
+        if include_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&include_dir) {
+                let mut headers: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                headers.sort_by_key(|e| e.file_name());
+                for entry in headers {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |ext| ext == "h") {
+                        let content = std::fs::read_to_string(&path)
+                            .with_context(|| format!("Failed to read {}", path.display()))?;
+                        parts.push(format!("// === {} ===\n{}", path.file_name().unwrap().to_string_lossy(), content));
+                    }
+                }
+            }
+        }
+
+        // Read source files from src/
+        let src_dir = test_case_dir.join("src");
+        if src_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&src_dir) {
+                let mut sources: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                sources.sort_by_key(|e| e.file_name());
+                for entry in sources {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |ext| ext == "c") {
+                        let content = std::fs::read_to_string(&path)
+                            .with_context(|| format!("Failed to read {}", path.display()))?;
+                        parts.push(format!("// === {} ===\n{}", path.file_name().unwrap().to_string_lossy(), content));
+                    }
+                }
+            }
+        }
+
+        if parts.is_empty() {
+            anyhow::bail!("No C source files found in {}", test_case_dir.display());
+        }
+
+        Ok(parts.join("\n\n"))
     }
 
     /// Collect all Rust source code from a program directory into a single string.
@@ -235,15 +350,23 @@ impl TranslationAgent {
 
     /// Translate a single program
     pub async fn translate_program(&self, program: &ProgramInfo, run_dir: &Path) -> Result<TranslationResult> {
-        let source_label = if program.translated_rust_path.to_string_lossy().contains("/dst/") {
-            "dst (c2rust)"
-        } else {
-            "translated_rust (crat)"
+        let source_label = match program.source_type {
+            SourceType::C => "test_case (C source)",
+            SourceType::Rust => {
+                if program.translated_rust_path.to_string_lossy().contains("/dst/") {
+                    "dst (c2rust)"
+                } else {
+                    "translated_rust (crat)"
+                }
+            }
         };
         println!("📝 Processing: {}/{} [source: {}]", program.collection, program.name, source_label);
 
-        // Collect all source code from the program
-        let source_code = self.collect_source_code(&program.translated_rust_path)?;
+        // Collect source code based on type
+        let source_code = match program.source_type {
+            SourceType::C => self.collect_c_source_code(&program.translated_rust_path)?,
+            SourceType::Rust => self.collect_source_code(&program.translated_rust_path)?,
+        };
 
         let line_count = source_code.lines().count();
         if line_count > self.config.max_lines {
@@ -276,8 +399,12 @@ impl TranslationAgent {
         }
         std::fs::create_dir_all(&output_dir)?;
 
-        // Copy supporting files
-        self.copy_supporting_files(&program.translated_rust_path, &output_dir)?;
+        // Copy supporting files: for C source, try dst/ for Cargo.toml etc., or generate them
+        if program.source_type == SourceType::C {
+            self.setup_supporting_files_for_c(program, &output_dir)?;
+        } else {
+            self.copy_supporting_files(&program.translated_rust_path, &output_dir)?;
+        }
 
         // Initialize components
         let translator = Translator::new();
@@ -298,7 +425,7 @@ impl TranslationAgent {
 
             // Translate the code
             let translated_code = match translator
-                .translate(&source_code, last_feedback.as_deref(), llm_client.as_ref())
+                .translate(&source_code, last_feedback.as_deref(), llm_client.as_ref(), &program.source_type)
                 .await
             {
                 Ok(output) => {
@@ -487,6 +614,49 @@ impl TranslationAgent {
         }
     }
 
+    /// Set up supporting files for C-source translation.
+    /// Tries to reuse Cargo.toml, rust-toolchain, etc. from dst/ if available,
+    /// otherwise generates minimal versions.
+    fn setup_supporting_files_for_c(&self, program: &ProgramInfo, dst: &Path) -> Result<()> {
+        // Try to find supporting files from dst/<name>/ or translated_rust/
+        let dst_nested = program.path.join("dst").join(&program.name);
+        let translated_rust = program.path.join("translated_rust");
+
+        let support_src = if dst_nested.join("Cargo.toml").exists() {
+            Some(dst_nested)
+        } else if translated_rust.join("Cargo.toml").exists() {
+            Some(translated_rust)
+        } else {
+            None
+        };
+
+        if let Some(src) = support_src {
+            // Reuse existing supporting files
+            self.copy_supporting_files(&src, dst)?;
+        } else {
+            // Generate minimal Cargo.toml
+            let cargo_toml = format!(
+                r#"[package]
+name = "{name}"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "{name}"
+path = "lib.rs"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+"#,
+                name = program.name
+            );
+            std::fs::write(dst.join("Cargo.toml"), cargo_toml)?;
+        }
+
+        Ok(())
+    }
+
     /// Copy supporting files (Cargo.toml, .cargo/config.toml, rust-toolchain, build.rs)
     /// and patch Cargo.toml so lib.path = "lib.rs" (flat layout, no src/ module tree).
     fn copy_supporting_files(&self, src: &Path, dst: &Path) -> Result<()> {
@@ -495,10 +665,24 @@ impl TranslationAgent {
         if cargo_toml.exists() {
             let content = std::fs::read_to_string(&cargo_toml)?;
             let dst_toml = dst.join("Cargo.toml");
-            // Parse, patch lib.path, and rewrite
+            // Parse, patch lib.path and ensure crate-type includes cdylib, then rewrite
             if let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() {
                 if let Some(lib) = doc.get_mut("lib").and_then(|v| v.as_table_mut()) {
                     lib.insert("path", toml_edit::value("lib.rs"));
+                    // Ensure cdylib is in crate-type (needed for dlopen by cando2)
+                    if let Some(crate_type) = lib.get("crate-type").and_then(|v| v.as_array()) {
+                        let has_cdylib = crate_type.iter().any(|v| v.as_str() == Some("cdylib"));
+                        if !has_cdylib {
+                            let mut new_types = crate_type.clone();
+                            new_types.push("cdylib");
+                            lib.insert("crate-type", toml_edit::value(new_types));
+                        }
+                    } else {
+                        let mut types = toml_edit::Array::new();
+                        types.push("cdylib");
+                        types.push("rlib");
+                        lib.insert("crate-type", toml_edit::value(types));
+                    }
                 }
                 std::fs::write(&dst_toml, doc.to_string())?;
             } else {

@@ -69,7 +69,7 @@ impl TestRunner {
         // 3. Run the tests
         // 4. Restore the original
 
-        let original_path = &self.program.translated_rust_path;
+        let original_path = &self.program.test_swap_path;
         let backup_path = self.program.path.join("translated_rust_backup");
 
         // Cleanup any previous backup
@@ -125,7 +125,7 @@ impl TestRunner {
 
         // Build and run the runner
         // Read toolchain from the translated_rust dir (now symlinked to our output)
-        let runner_toolchain = Self::read_toolchain(&self.program.translated_rust_path)
+        let runner_toolchain = Self::read_toolchain(&self.program.test_swap_path)
             .or_else(|| Self::read_toolchain(&self.output_dir));
 
         // First, build the runner project
@@ -238,8 +238,10 @@ mod tests {
             collection: "test_collection".to_string(),
             path: PathBuf::from("/tmp/test"),
             translated_rust_path: PathBuf::from("/tmp/test/translated_rust"),
+            test_swap_path: PathBuf::from("/tmp/test/translated_rust"),
             runner_path: PathBuf::from("/tmp/test/runner"),
             test_vectors_path: PathBuf::from("/tmp/test/test_vectors"),
+            source_type: crate::translation::SourceType::Rust,
         }
     }
 

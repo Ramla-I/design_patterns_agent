@@ -12,10 +12,11 @@ Analyzes Rust projects to automatically identify and document:
 - **Linear Type Invariants**: Ordering requirements and capability patterns that ensure operations happen in sequence
 - **Ownership Invariants**: Lifetime and borrowing patterns that enforce memory safety
 
-### C2Rust Translation
+### C2Rust / C Translation
 
-Translates mechanically-generated C2Rust code into idiomatic, safe Rust:
+Translates mechanically-generated C2Rust code **or raw C source** into idiomatic, safe Rust:
 
+- Accepts C2Rust output (`translated_rust/`, `dst/`) or raw C code (`test_case/`) as input
 - Iterative LLM-powered translation with build and test feedback loops
 - Clippy-based idiomaticity scoring
 - Automatic retry on build/test failures (up to configurable max)
@@ -77,6 +78,32 @@ cargo run --release -- translate Public-Tests/ --skip-tests
 cargo run --release -- translate Public-Tests/ --analyze
 ```
 
+### C Source Translation
+
+Programs with a `test_case/` directory containing raw C source (`src/lib.c`, `include/lib.h`)
+can be translated directly to Rust without requiring a prior C2Rust pass.
+
+```bash
+# Auto-detected: if no Rust source is found, test_case/ C source is used as fallback
+cargo run --release -- translate Public-Tests/B02_organic/arr_del_lib
+
+# Force C source mode (use test_case/ even when C2Rust output exists)
+cargo run --release -- translate Public-Tests/ --from-c
+```
+
+Expected `test_case/` layout:
+```
+program_name/
+  test_case/
+    src/lib.c          # C implementation
+    include/lib.h      # C header
+  runner/              # cando2 test harness
+  test_vectors/        # JSON test inputs/outputs
+```
+
+When translating from C source, the tool reuses `Cargo.toml` and build files from `dst/` if
+available, or generates a minimal `Cargo.toml` automatically.
+
 Translation outputs are saved to `runs/<model>_<YYYYMMDD>_<HHMMSS>/` with the structure:
 
 ```
@@ -129,8 +156,8 @@ cargo run -- analyze /path/to/project --config config.toml
 ### Translation Pipeline
 
 1. **Discover**: Walks the directory tree to find programs with `runner/` and `test_vectors/`
-2. **Collect**: Gathers source from `translated_rust/` (crat) or `dst/` (raw c2rust)
-3. **Translate**: Sends source to LLM with a system prompt targeting idiomatic, safe Rust
+2. **Collect**: Gathers source from `translated_rust/` (crat), `dst/` (raw c2rust), or `test_case/` (raw C)
+3. **Translate**: Sends source to LLM with a source-type-specific prompt (C2Rust→Rust or C→Rust)
 4. **Build**: Compiles the translation with `cargo build --release`
 5. **Test**: Runs test vectors via the `cando2` harness (symlink-swaps the candidate library)
 6. **Feedback**: On failure, sends build errors or test diffs back to the LLM for another attempt
@@ -174,6 +201,7 @@ For detailed development documentation, see [CLAUDE.md](CLAUDE.md).
 - ✅ Markdown and JSON reports
 - ✅ OpenAI-compatible LLM integration
 - ✅ C2Rust to idiomatic Rust translation pipeline
+- ✅ Direct C to Rust translation (--from-c)
 - ✅ Iterative build/test feedback loop
 - ✅ Clippy idiomaticity scoring
 - ✅ Timestamped run directories for output organization

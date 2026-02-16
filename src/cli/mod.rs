@@ -55,7 +55,7 @@ pub enum Command {
         path: PathBuf,
     },
 
-    /// Translate C2Rust code to idiomatic Rust
+    /// Translate C2Rust or C code to idiomatic Rust
     Translate {
         /// Path to Public-Tests directory or a specific program
         #[arg(value_name = "PATH")]
@@ -76,6 +76,10 @@ pub enum Command {
         /// Skip running tests (only verify build succeeds)
         #[arg(long)]
         skip_tests: bool,
+
+        /// Translate from C source (test_case/) instead of C2Rust output
+        #[arg(long)]
+        from_c: bool,
 
         /// Output summary report file
         #[arg(long)]
@@ -135,8 +139,8 @@ pub async fn run() -> Result<()> {
         Some(Command::Analyze { path }) => {
             run_analyze(&cli, path).await
         }
-        Some(Command::Translate { path, max_retries, max_lines, analyze, skip_tests, report }) => {
-            run_translate(&cli, path, *max_retries, *max_lines, *analyze, *skip_tests, report.as_ref()).await
+        Some(Command::Translate { path, max_retries, max_lines, analyze, skip_tests, from_c, report }) => {
+            run_translate(&cli, path, *max_retries, *max_lines, *analyze, *skip_tests, *from_c, report.as_ref()).await
         }
         None => {
             // Default behavior: analyze if path provided
@@ -190,6 +194,7 @@ async fn run_translate(
     max_lines: usize,
     analyze: bool,
     skip_tests: bool,
+    from_c: bool,
     report_path: Option<&PathBuf>,
 ) -> Result<()> {
     use crate::translation::{TranslationAgent, TranslationConfig};
@@ -215,6 +220,7 @@ async fn run_translate(
         max_lines,
         analyze_patterns: analyze,
         skip_tests,
+        from_c,
         ..Default::default()
     };
 
