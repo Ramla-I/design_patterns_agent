@@ -381,6 +381,8 @@ impl TranslationAgent {
                 idiomaticity: None,
                 design_patterns: None,
                 last_build_error: None,
+                input_tokens: 0,
+                output_tokens: 0,
                 total_tokens: 0,
                 total_llm_secs: 0.0,
             });
@@ -415,6 +417,8 @@ impl TranslationAgent {
         let mut last_feedback: Option<String> = None;
         let mut last_build_error_msg: Option<String> = None;
         let mut attempts = 0;
+        let mut cumulative_input_tokens: usize = 0;
+        let mut cumulative_output_tokens: usize = 0;
         let mut cumulative_tokens: usize = 0;
         let mut cumulative_llm_secs: f64 = 0.0;
 
@@ -429,8 +433,10 @@ impl TranslationAgent {
                 .await
             {
                 Ok(output) => {
-                    println!("   📊 LLM: {:.1}s | {} prompt + {} completion = {} tokens",
+                    println!("   📊 LLM: {:.1}s | {} input + {} output = {} tokens",
                         output.duration_secs, output.prompt_tokens, output.completion_tokens, output.total_tokens);
+                    cumulative_input_tokens += output.prompt_tokens;
+                    cumulative_output_tokens += output.completion_tokens;
                     cumulative_tokens += output.total_tokens;
                     cumulative_llm_secs += output.duration_secs;
                     output.code
@@ -449,6 +455,8 @@ impl TranslationAgent {
                             idiomaticity: None,
                             design_patterns: None,
                             last_build_error: None,
+                            input_tokens: cumulative_input_tokens,
+                            output_tokens: cumulative_output_tokens,
                             total_tokens: cumulative_tokens,
                             total_llm_secs: cumulative_llm_secs,
                         });
@@ -466,6 +474,8 @@ impl TranslationAgent {
                             idiomaticity: None,
                             design_patterns: None,
                             last_build_error: None,
+                            input_tokens: cumulative_input_tokens,
+                            output_tokens: cumulative_output_tokens,
                             total_tokens: cumulative_tokens,
                             total_llm_secs: cumulative_llm_secs,
                         });
@@ -499,8 +509,10 @@ impl TranslationAgent {
                             idiomaticity: None,
                             design_patterns: None,
                             last_build_error: last_build_error_msg,
-                        total_tokens: cumulative_tokens,
-                        total_llm_secs: cumulative_llm_secs,
+                            input_tokens: cumulative_input_tokens,
+                            output_tokens: cumulative_output_tokens,
+                            total_tokens: cumulative_tokens,
+                            total_llm_secs: cumulative_llm_secs,
                         });
                     }
                     last_feedback = Some(feedback_formatter.format_build_error(&build_error));
@@ -534,6 +546,8 @@ impl TranslationAgent {
                     idiomaticity: Some(idiomaticity),
                     design_patterns,
                     last_build_error: None,
+                    input_tokens: cumulative_input_tokens,
+                    output_tokens: cumulative_output_tokens,
                     total_tokens: cumulative_tokens,
                     total_llm_secs: cumulative_llm_secs,
                 });
@@ -568,6 +582,8 @@ impl TranslationAgent {
                             idiomaticity: Some(idiomaticity),
                             design_patterns,
                             last_build_error: None,
+                            input_tokens: cumulative_input_tokens,
+                            output_tokens: cumulative_output_tokens,
                             total_tokens: cumulative_tokens,
                             total_llm_secs: cumulative_llm_secs,
                         });
@@ -584,6 +600,8 @@ impl TranslationAgent {
                                 idiomaticity: None,
                                 design_patterns: None,
                                 last_build_error: None,
+                                input_tokens: cumulative_input_tokens,
+                                output_tokens: cumulative_output_tokens,
                                 total_tokens: cumulative_tokens,
                                 total_llm_secs: cumulative_llm_secs,
                             });
@@ -602,6 +620,8 @@ impl TranslationAgent {
                             attempts,
                             test_vectors: None,
                             idiomaticity: None,
+                            input_tokens: cumulative_input_tokens,
+                            output_tokens: cumulative_output_tokens,
                             total_tokens: cumulative_tokens,
                             total_llm_secs: cumulative_llm_secs,
                             design_patterns: None,
@@ -773,6 +793,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
             results.push(result);
         }
 
+        let grand_input_tokens: usize = results.iter().map(|r| r.input_tokens).sum();
+        let grand_output_tokens: usize = results.iter().map(|r| r.output_tokens).sum();
         let grand_total_tokens: usize = results.iter().map(|r| r.total_tokens).sum();
         let grand_total_secs: f64 = results.iter().map(|r| r.total_llm_secs).sum();
 
@@ -781,7 +803,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
         println!("   ❌ Failed: {}", failed_count);
         println!("   ⏭️  Skipped: {}", skipped_count);
         println!("   📁 Total: {}", programs.len());
-        println!("   🔢 Total tokens: {}", grand_total_tokens);
+        println!("   🔢 Tokens: {} input + {} output = {} total", grand_input_tokens, grand_output_tokens, grand_total_tokens);
         println!("   ⏱️  Total LLM time: {:.1}s", grand_total_secs);
 
         let run_dir_str = run_dir.to_string_lossy().to_string();

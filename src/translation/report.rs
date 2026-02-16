@@ -31,6 +31,10 @@ pub struct TranslationResult {
     /// Last build error message (if build failed)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_build_error: Option<String>,
+    /// Input (prompt) tokens used across all attempts
+    pub input_tokens: usize,
+    /// Output (completion) tokens used across all attempts
+    pub output_tokens: usize,
     /// Total LLM tokens used across all attempts
     pub total_tokens: usize,
     /// Total LLM time in seconds across all attempts
@@ -111,8 +115,12 @@ impl TranslationReport {
         };
         md.push_str(&format!("| Success Rate | {:.1}% |\n", success_rate));
 
+        let grand_input_tokens: usize = self.results.iter().map(|r| r.input_tokens).sum();
+        let grand_output_tokens: usize = self.results.iter().map(|r| r.output_tokens).sum();
         let grand_total_tokens: usize = self.results.iter().map(|r| r.total_tokens).sum();
         let grand_total_secs: f64 = self.results.iter().map(|r| r.total_llm_secs).sum();
+        md.push_str(&format!("| Input Tokens | {} |\n", grand_input_tokens));
+        md.push_str(&format!("| Output Tokens | {} |\n", grand_output_tokens));
         md.push_str(&format!("| Total LLM Tokens | {} |\n", grand_total_tokens));
         md.push_str(&format!("| Total LLM Time | {:.1}s |\n\n", grand_total_secs));
 
@@ -263,6 +271,8 @@ mod tests {
             }),
             design_patterns: None,
             last_build_error: None,
+            input_tokens: 0,
+            output_tokens: 0,
             total_tokens: 0,
             total_llm_secs: 0.0,
         };
@@ -287,6 +297,8 @@ mod tests {
             idiomaticity: None,
             design_patterns: None,
             last_build_error: None,
+            input_tokens: 0,
+            output_tokens: 0,
             total_tokens: 0,
             total_llm_secs: 0.0,
         };
@@ -325,6 +337,8 @@ mod tests {
                     }),
                     design_patterns: None,
                     last_build_error: None,
+                    input_tokens: 1000,
+                    output_tokens: 500,
                     total_tokens: 1500,
                     total_llm_secs: 3.2,
                 },
@@ -338,6 +352,8 @@ mod tests {
                     idiomaticity: None,
                     design_patterns: None,
                     last_build_error: None,
+                    input_tokens: 600,
+                    output_tokens: 200,
                     total_tokens: 800,
                     total_llm_secs: 2.1,
                 },
