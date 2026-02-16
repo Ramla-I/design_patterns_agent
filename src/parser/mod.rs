@@ -17,6 +17,7 @@ pub fn parse_file(path: &Path, content: &str) -> Result<Vec<CodeItem>> {
 
 /// Find the crate root (lib.rs or main.rs) in a directory
 pub fn find_crate_root(dir: &Path) -> Result<PathBuf> {
+    // Check standard Rust project layout: src/lib.rs or src/main.rs
     let lib_rs = dir.join("src/lib.rs");
     if lib_rs.exists() {
         return Ok(lib_rs);
@@ -25,6 +26,17 @@ pub fn find_crate_root(dir: &Path) -> Result<PathBuf> {
     let main_rs = dir.join("src/main.rs");
     if main_rs.exists() {
         return Ok(main_rs);
+    }
+
+    // Check for lib.rs or main.rs directly in the root (e.g., translated_rust folders)
+    let root_lib_rs = dir.join("lib.rs");
+    if root_lib_rs.exists() {
+        return Ok(root_lib_rs);
+    }
+
+    let root_main_rs = dir.join("main.rs");
+    if root_main_rs.exists() {
+        return Ok(root_main_rs);
     }
 
     anyhow::bail!("Could not find crate root (lib.rs or main.rs) in {:?}", dir)

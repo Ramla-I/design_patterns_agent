@@ -104,8 +104,13 @@ pub struct SourceLocation {
 /// Extract all code items from a parsed syntax tree
 pub fn extract_items(file: &File, path: &Path) -> Vec<CodeItem> {
     let mut items = Vec::new();
+    extract_items_from_slice(&file.items, path, &mut items);
+    items
+}
 
-    for item in &file.items {
+/// Recursively extract items from a slice of syn::Item, handling inline modules
+fn extract_items_from_slice(syn_items: &[Item], path: &Path, items: &mut Vec<CodeItem>) {
+    for item in syn_items {
         match item {
             Item::Struct(s) => {
                 if let Some(code_item) = extract_struct(s, path) {
@@ -137,11 +142,15 @@ pub fn extract_items(file: &File, path: &Path) -> Vec<CodeItem> {
                     items.push(CodeItem::TypeAlias(code_item));
                 }
             }
+            // Recursively handle inline modules (e.g., `pub mod foo { ... }`)
+            Item::Mod(m) => {
+                if let Some((_, content_items)) = &m.content {
+                    extract_items_from_slice(content_items, path, items);
+                }
+            }
             _ => {}
         }
     }
-
-    items
 }
 
 fn extract_struct(item: &ItemStruct, path: &Path) -> Option<StructDef> {

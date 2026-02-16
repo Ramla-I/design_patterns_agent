@@ -12,6 +12,8 @@ pub struct LlmRequest {
 pub struct LlmResponse {
     pub content: String,
     pub tokens_used: usize,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
 }
 
 #[async_trait]

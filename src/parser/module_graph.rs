@@ -23,50 +23,81 @@ pub struct ModuleGraph {
 impl ModuleGraph {
     /// Build a module graph from a crate root
     pub fn from_crate_root(root_path: &Path) -> Result<Self> {
-        let crate_dir = root_path.parent().unwrap().parent().unwrap();
-        let src_dir = crate_dir.join("src");
-
-        if !src_dir.exists() {
-            anyhow::bail!("src directory not found in {:?}", crate_dir);
-        }
+        // Determine the source directory based on project structure
+        // Standard layout: root_path is /project/src/lib.rs, src_dir is /project/src
+        // Flat layout: root_path is /project/lib.rs, src_dir is /project
+        let root_parent = root_path.parent().unwrap();
+        let is_standard_layout = root_parent.file_name().map_or(false, |n| n == "src");
+        let src_dir = if is_standard_layout {
+            // Standard layout: src/lib.rs
+            root_parent.to_path_buf()
+        } else {
+            // Flat layout: lib.rs in root directory
+            root_parent.to_path_buf()
+        };
 
         let mut modules = HashMap::new();
         let mut discovered_modules = HashSet::new();
 
-        // Parse all Rust files in src/
-        for entry in WalkDir::new(&src_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
-        {
-            let file_path = entry.path();
-            let module_name = Self::path_to_module_name(&src_dir, file_path)?;
+        // Collect all directories to scan for .rs files
+        let mut dirs_to_scan = vec![src_dir.clone()];
 
-            if discovered_modules.contains(&module_name) {
-                continue;
+        // For flat layouts, also check for src/ subdirectory with additional modules
+        if !is_standard_layout {
+            let potential_src = root_parent.join("src");
+            if potential_src.exists() && potential_src.is_dir() {
+                dirs_to_scan.push(potential_src);
             }
-            discovered_modules.insert(module_name.clone());
+        }
 
-            let items = crate::parser::read_and_parse(file_path)?;
+        // Parse all Rust files in source directories
+        for scan_dir in &dirs_to_scan {
+            for entry in WalkDir::new(scan_dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+                .filter(|e| !e.path().to_string_lossy().contains("/target/"))
+            {
+                let file_path = entry.path();
+                let module_name = match Self::path_to_module_name(&src_dir, file_path) {
+                    Ok(name) => name,
+                    Err(_) => continue, // Skip files we can't determine module name for
+                };
 
-            // Determine if this is the root module
-            let is_root = file_path
-                .file_name()
-                .map_or(false, |name| name == "lib.rs" || name == "main.rs");
+                if discovered_modules.contains(&module_name) {
+                    continue;
+                }
+                discovered_modules.insert(module_name.clone());
 
-            // Collect submodule declarations
-            let submodules = Self::find_submodule_declarations(file_path)?;
+                // Try to parse the file, skip if it fails (some files may have syntax not supported by syn)
+                let items = match crate::parser::read_and_parse(file_path) {
+                    Ok(items) => items,
+                    Err(_) => {
+                        // Still register the module but with empty items
+                        // This allows us to continue analyzing other files
+                        vec![]
+                    }
+                };
 
-            modules.insert(
-                module_name.clone(),
-                Module {
-                    name: module_name.clone(),
-                    path: file_path.to_path_buf(),
-                    items,
-                    submodules,
-                    is_root,
-                },
-            );
+                // Determine if this is the root module
+                let is_root = file_path
+                    .file_name()
+                    .map_or(false, |name| name == "lib.rs" || name == "main.rs");
+
+                // Collect submodule declarations (don't fail on error)
+                let submodules = Self::find_submodule_declarations(file_path).unwrap_or_default();
+
+                modules.insert(
+                    module_name.clone(),
+                    Module {
+                        name: module_name.clone(),
+                        path: file_path.to_path_buf(),
+                        items,
+                        submodules,
+                        is_root,
+                    },
+                );
+            }
         }
 
         // Find the root module

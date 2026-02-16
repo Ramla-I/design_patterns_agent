@@ -3,17 +3,26 @@ use crate::parser::{CodeItem, ImplBlock, StructDef};
 /// An "interesting" code item that warrants invariant analysis
 #[derive(Debug, Clone)]
 pub enum InterestingItem {
-    /// A struct with PhantomData (potential typestate)
+    /// A struct with its associated impl blocks - analyze for potential invariants
+    StructWithImpls {
+        struct_def: StructDef,
+        impl_blocks: Vec<ImplBlock>,
+    },
+    /// A standalone impl block (for types we don't have struct definitions for)
+    StandaloneImpl {
+        impl_block: ImplBlock,
+    },
+    /// A struct with PhantomData (potential typestate) - legacy
     TypeStateCandidate {
         struct_def: StructDef,
         impl_blocks: Vec<ImplBlock>,
     },
-    /// A struct with Drop implementation (potential linear type)
+    /// A struct with Drop implementation (potential linear type) - legacy
     LinearTypeCandidate {
         struct_def: StructDef,
         impl_blocks: Vec<ImplBlock>,
     },
-    /// Methods that consume self (potential state transition)
+    /// Methods that consume self (potential state transition) - legacy
     StateTransition {
         impl_block: ImplBlock,
     },
@@ -34,22 +43,28 @@ pub struct CodeContext {
 
 impl InterestingItem {
     /// Check if a code item is "interesting" for invariant analysis
+    /// Now analyzes ALL structs and impl blocks to infer invariants from non-idiomatic code
     pub fn from_code_item(item: &CodeItem, related_impls: &[ImplBlock]) -> Option<Self> {
         match item {
-            CodeItem::Struct(s) if s.has_phantom_data => {
-                Some(InterestingItem::TypeStateCandidate {
-                    struct_def: s.clone(),
-                    impl_blocks: related_impls.to_vec(),
-                })
+            // Analyze ALL structs - we want to infer invariants from any code
+            CodeItem::Struct(s) => {
+                // Skip trivial structs with no fields and no methods
+                let has_fields = !s.fields.is_empty();
+                let has_methods = !related_impls.is_empty() &&
+                    related_impls.iter().any(|i| !i.methods.is_empty());
+
+                if has_fields || has_methods {
+                    Some(InterestingItem::StructWithImpls {
+                        struct_def: s.clone(),
+                        impl_blocks: related_impls.to_vec(),
+                    })
+                } else {
+                    None
+                }
             }
-            CodeItem::Struct(s) if has_drop_impl(s, related_impls) => {
-                Some(InterestingItem::LinearTypeCandidate {
-                    struct_def: s.clone(),
-                    impl_blocks: related_impls.to_vec(),
-                })
-            }
-            CodeItem::Impl(impl_block) if has_consuming_methods(impl_block) => {
-                Some(InterestingItem::StateTransition {
+            // Analyze impl blocks for types we may not have struct definitions for
+            CodeItem::Impl(impl_block) if !impl_block.methods.is_empty() => {
+                Some(InterestingItem::StandaloneImpl {
                     impl_block: impl_block.clone(),
                 })
             }
@@ -60,6 +75,22 @@ impl InterestingItem {
     /// Get a description of why this item is interesting
     pub fn reason(&self) -> String {
         match self {
+            InterestingItem::StructWithImpls { struct_def, impl_blocks } => {
+                let method_count: usize = impl_blocks.iter().map(|i| i.methods.len()).sum();
+                format!(
+                    "Struct '{}' with {} fields and {} methods - analyzing for implicit invariants",
+                    struct_def.name,
+                    struct_def.fields.len(),
+                    method_count
+                )
+            }
+            InterestingItem::StandaloneImpl { impl_block } => {
+                format!(
+                    "Impl block for '{}' with {} methods - analyzing for ordering/state invariants",
+                    impl_block.type_name,
+                    impl_block.methods.len()
+                )
+            }
             InterestingItem::TypeStateCandidate { .. } => {
                 "Contains PhantomData, potential typestate pattern".to_string()
             }

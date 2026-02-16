@@ -7,6 +7,12 @@ pub struct EvidenceExtractor;
 impl EvidenceExtractor {
     pub fn extract_code_snippet(context: &CodeContext) -> String {
         match &context.item {
+            InterestingItem::StructWithImpls { struct_def, impl_blocks } => {
+                Self::format_struct_with_impls(struct_def, impl_blocks)
+            }
+            InterestingItem::StandaloneImpl { impl_block } => {
+                Self::format_impl_block(impl_block)
+            }
             InterestingItem::TypeStateCandidate { struct_def, impl_blocks } => {
                 Self::format_typestate(struct_def, impl_blocks)
             }
@@ -20,6 +26,28 @@ impl EvidenceExtractor {
                 "// Generic interesting item".to_string()
             }
         }
+    }
+
+    fn format_struct_with_impls(struct_def: &StructDef, impl_blocks: &[ImplBlock]) -> String {
+        let mut output = String::new();
+
+        // Format the struct with any doc comments
+        if let Some(doc) = &struct_def.doc_comment {
+            output.push_str(&format!("/// {}\n", doc));
+        }
+        output.push_str(&format!("pub struct {}{} {{\n", struct_def.name, struct_def.generics));
+        for field in &struct_def.fields {
+            output.push_str(&format!("    {}: {},\n", field.name, field.ty));
+        }
+        output.push_str("}\n\n");
+
+        // Format all impl blocks
+        for impl_block in impl_blocks {
+            output.push_str(&Self::format_impl_block(impl_block));
+            output.push_str("\n\n");
+        }
+
+        output
     }
 
     fn format_typestate(struct_def: &StructDef, impl_blocks: &[ImplBlock]) -> String {

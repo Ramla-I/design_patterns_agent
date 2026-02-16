@@ -140,6 +140,12 @@ NO INVARIANTS FOUND"#,
 
     fn get_file_path(&self, context: &CodeContext) -> String {
         match &context.item {
+            crate::navigation::InterestingItem::StructWithImpls { struct_def, .. } => {
+                struct_def.source_location.file_path.clone()
+            }
+            crate::navigation::InterestingItem::StandaloneImpl { impl_block } => {
+                impl_block.source_location.file_path.clone()
+            }
             crate::navigation::InterestingItem::TypeStateCandidate { struct_def, .. } => {
                 struct_def.source_location.file_path.clone()
             }
