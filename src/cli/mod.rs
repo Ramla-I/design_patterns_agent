@@ -14,7 +14,7 @@ pub struct Cli {
     pub command: Option<Command>,
 
     /// Path to the Rust codebase to analyze (for analyze command)
-    #[arg(value_name = "PATH", global = true)]
+    #[arg(value_name = "CODEBASE_PATH")]
     pub codebase_path: Option<PathBuf>,
 
     /// Output format
@@ -57,16 +57,16 @@ pub enum Command {
 
     /// Translate C2Rust or C code to idiomatic Rust
     Translate {
-        /// Path to Public-Tests directory or a specific program
-        #[arg(value_name = "PATH")]
-        path: PathBuf,
+        /// Paths to Public-Tests directories or specific programs
+        #[arg(value_name = "PATH", required = true)]
+        paths: Vec<PathBuf>,
 
         /// Maximum number of retry attempts for failed translations
         #[arg(long, default_value = "5")]
         max_retries: usize,
 
         /// Maximum lines in a source file before skipping
-        #[arg(long, default_value = "1000")]
+        #[arg(long, default_value = "2000")]
         max_lines: usize,
 
         /// Run design patterns analysis on successful translations
@@ -139,8 +139,8 @@ pub async fn run() -> Result<()> {
         Some(Command::Analyze { path }) => {
             run_analyze(&cli, path).await
         }
-        Some(Command::Translate { path, max_retries, max_lines, analyze, skip_tests, from_c, report }) => {
-            run_translate(&cli, path, *max_retries, *max_lines, *analyze, *skip_tests, *from_c, report.as_ref()).await
+        Some(Command::Translate { paths, max_retries, max_lines, analyze, skip_tests, from_c, report }) => {
+            run_translate(&cli, paths, *max_retries, *max_lines, *analyze, *skip_tests, *from_c, report.as_ref()).await
         }
         None => {
             // Default behavior: analyze if path provided
@@ -189,7 +189,7 @@ async fn run_analyze(cli: &Cli, path: &PathBuf) -> Result<()> {
 
 async fn run_translate(
     cli: &Cli,
-    path: &PathBuf,
+    paths: &[PathBuf],
     max_retries: usize,
     max_lines: usize,
     analyze: bool,
@@ -199,13 +199,15 @@ async fn run_translate(
 ) -> Result<()> {
     use crate::translation::{TranslationAgent, TranslationConfig};
 
-    // Validate path
-    if !path.exists() {
-        anyhow::bail!("Path does not exist: {:?}", path);
+    // Validate paths
+    for path in paths {
+        if !path.exists() {
+            anyhow::bail!("Path does not exist: {:?}", path);
+        }
     }
 
-    // Create a dummy Args for Config creation
-    let args = Args::from_cli(cli, path.clone());
+    // Create a dummy Args for Config creation (use first path)
+    let args = Args::from_cli(cli, paths[0].clone());
 
     // Load configuration
     let llm_config = if let Some(config_path) = &args.config {
@@ -226,7 +228,7 @@ async fn run_translate(
 
     // Create and run the translation agent
     let agent = TranslationAgent::new(translation_config, llm_config);
-    let report = agent.translate_all(path).await?;
+    let report = agent.translate_all(paths).await?;
 
     // Write report
     let output = match cli.format {
@@ -300,8 +302,8 @@ mod tests {
         ]);
 
         match cli.command {
-            Some(Command::Translate { path, max_retries, analyze, .. }) => {
-                assert_eq!(path, PathBuf::from("/path/to/tests"));
+            Some(Command::Translate { paths, max_retries, analyze, .. }) => {
+                assert_eq!(paths, vec![PathBuf::from("/path/to/tests")]);
                 assert_eq!(max_retries, 3);
                 assert!(analyze);
             }

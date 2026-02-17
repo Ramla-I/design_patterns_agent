@@ -48,7 +48,7 @@ impl Default for TranslationConfig {
     fn default() -> Self {
         Self {
             max_retries: 5,
-            max_lines: 1000,
+            max_lines: 2000,
             analyze_patterns: false,
             cando2_path: "../../../../tools/cando2".to_string(),
             skip_tests: false,
@@ -137,6 +137,11 @@ impl TranslationAgent {
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown")
                 .to_string();
+
+            // Skip duplicate program names (e.g. src/B02_organic/aabb_lib/ mirrors aabb_lib/)
+            if programs.iter().any(|p: &ProgramInfo| p.name == program_name) {
+                continue;
+            }
 
             let collection_name = program_dir
                 .parent()
@@ -752,8 +757,11 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
     /// Translate all discovered programs.
     /// Outputs are placed in `runs/<model>_<YYYYMMDD>_<HHMMSS>/`.
-    pub async fn translate_all(&self, path: &Path) -> Result<TranslationReport> {
-        let programs = self.discover_programs(path)?;
+    pub async fn translate_all(&self, paths: &[PathBuf]) -> Result<TranslationReport> {
+        let mut programs = Vec::new();
+        for path in paths {
+            programs.extend(self.discover_programs(path)?);
+        }
         println!("🔍 Discovered {} programs to translate\n", programs.len());
 
         // Build run directory: runs/<model>_<YYYYMMDD>_<HHMMSS>
