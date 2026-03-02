@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::ProgramInfo;
+use super::{ProgramInfo, ProgramType};
 use super::report::TestVectorResults;
 
 /// Handles building and running tests for translated code
@@ -60,8 +61,16 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Run tests using the cando2 harness with symlink swapping
+    /// Run tests — dispatches to cando2 harness for libraries or stdin/stdout runner for executables
     pub async fn run_tests(&self) -> Result<TestVectorResults> {
+        match self.program.program_type {
+            ProgramType::Library => self.run_library_tests().await,
+            ProgramType::Executable => self.run_executable_tests().await,
+        }
+    }
+
+    /// Run tests for library programs using the cando2 harness with symlink swapping
+    async fn run_library_tests(&self) -> Result<TestVectorResults> {
         // The test runner expects translated_rust to point to the code under test
         // We need to:
         // 1. Backup the original translated_rust symlink/directory
@@ -104,7 +113,7 @@ impl TestRunner {
         }
 
         // Run tests and capture result (ensure we restore even on error)
-        let test_result = self.execute_tests().await;
+        let test_result = self.execute_library_tests().await;
 
         // Restore original (cleanup)
         if original_path.is_symlink() {
@@ -118,8 +127,11 @@ impl TestRunner {
         test_result
     }
 
-    /// Execute the actual test run
-    async fn execute_tests(&self) -> Result<TestVectorResults> {
+    /// Execute the actual library test run via cando2 harness
+    async fn execute_library_tests(&self) -> Result<TestVectorResults> {
+        let runner_path = self.program.runner_path.as_ref()
+            .context("Library program must have a runner_path")?;
+
         // Count test vectors
         let test_vector_count = self.count_test_vectors()?;
 
@@ -133,7 +145,7 @@ impl TestRunner {
         build_cmd
             .arg("build")
             .arg("--release")
-            .current_dir(&self.program.runner_path)
+            .current_dir(runner_path)
             .env("CARGO_TERM_COLOR", "never")
             .env("RUST_ARTIFACTS", "1");
         if let Some(ref tc) = runner_toolchain {
@@ -156,7 +168,7 @@ impl TestRunner {
             .arg("--release")
             .arg("--")
             .arg("lib")
-            .current_dir(&self.program.runner_path)
+            .current_dir(runner_path)
             .env("CARGO_TERM_COLOR", "never")
             .env("RUST_ARTIFACTS", "1");
         if let Some(ref tc) = runner_toolchain {
@@ -226,6 +238,146 @@ impl TestRunner {
             failures,
         })
     }
+
+    /// Run tests for executable programs by running the binary with each test vector's
+    /// argv/stdin and comparing stdout/stderr/exit code.
+    async fn run_executable_tests(&self) -> Result<TestVectorResults> {
+        let test_vector_count = self.count_test_vectors()?;
+
+        // Find the binary — cargo build --release puts it in target/release/<name>
+        let binary_path = self.output_dir.join("target").join("release").join(&self.program.name);
+        if !binary_path.exists() {
+            anyhow::bail!("Binary not found at {}", binary_path.display());
+        }
+
+        // Collect and sort test vector files
+        let mut test_files: Vec<_> = std::fs::read_dir(&self.program.test_vectors_path)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+            .map(|e| e.path())
+            .collect();
+        test_files.sort();
+
+        let mut passed = 0;
+        let mut failed = 0;
+        let mut failures = Vec::new();
+
+        for test_file in &test_files {
+            let content = std::fs::read_to_string(test_file)
+                .with_context(|| format!("Failed to read test vector {}", test_file.display()))?;
+            let tv: ExecTestVector = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse test vector {}", test_file.display()))?;
+
+            let test_name = test_file.file_name().unwrap().to_string_lossy().to_string();
+
+            // Build command with argv
+            let mut cmd = Command::new(&binary_path);
+            for arg in &tv.argv {
+                cmd.arg(arg);
+            }
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            let mut child = cmd.spawn()
+                .with_context(|| format!("Failed to spawn binary for {}", test_name))?;
+
+            // Write stdin if provided
+            let stdin_data = tv.stdin.as_deref().unwrap_or("");
+            if !stdin_data.is_empty() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(stdin_data.as_bytes());
+                    // stdin is dropped here, closing the pipe
+                }
+            } else {
+                // Close stdin immediately so the process doesn't block
+                drop(child.stdin.take());
+            }
+
+            let output = child.wait_with_output()
+                .with_context(|| format!("Failed to wait for binary in {}", test_name))?;
+
+            let actual_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let actual_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let actual_rc = output.status.code().unwrap_or(-1);
+            let expected_rc = tv.rc.unwrap_or(0);
+
+            let mut test_passed = true;
+            let mut diff_details = Vec::new();
+
+            // Check stdout
+            let stdout_matches = match &tv.stdout {
+                Some(pattern) => Self::check_pattern(&actual_stdout, &pattern.pattern, pattern.is_regex.unwrap_or(false)),
+                None => true,
+            };
+            if !stdout_matches {
+                test_passed = false;
+                let expected = tv.stdout.as_ref().map(|p| p.pattern.as_str()).unwrap_or("");
+                diff_details.push(format!("stdout mismatch:\n  expected: {:?}\n  actual:   {:?}", expected, actual_stdout));
+            }
+
+            // Check stderr (only if pattern is present and non-empty)
+            if let Some(ref stderr_pattern) = tv.stderr {
+                if !stderr_pattern.pattern.is_empty() {
+                    let stderr_matches = Self::check_pattern(&actual_stderr, &stderr_pattern.pattern, stderr_pattern.is_regex.unwrap_or(false));
+                    if !stderr_matches {
+                        test_passed = false;
+                        diff_details.push(format!("stderr mismatch:\n  expected: {:?}\n  actual:   {:?}", stderr_pattern.pattern, actual_stderr));
+                    }
+                }
+            }
+
+            // Check exit code
+            if actual_rc != expected_rc {
+                test_passed = false;
+                diff_details.push(format!("exit code mismatch: expected {}, got {}", expected_rc, actual_rc));
+            }
+
+            if test_passed {
+                passed += 1;
+            } else {
+                failed += 1;
+                failures.push(format!("{}: FAILED\n{}", test_name, diff_details.join("\n")));
+            }
+        }
+
+        Ok(TestVectorResults {
+            total: test_vector_count,
+            passed,
+            failed,
+            failures,
+        })
+    }
+
+    /// Check if actual output matches expected pattern (exact or regex)
+    fn check_pattern(actual: &str, expected: &str, is_regex: bool) -> bool {
+        if is_regex {
+            match regex::Regex::new(expected) {
+                Ok(re) => re.is_match(actual),
+                Err(_) => actual == expected, // Fall back to exact match if regex is invalid
+            }
+        } else {
+            actual == expected
+        }
+    }
+}
+
+/// Test vector JSON format for executable programs
+#[derive(Debug, serde::Deserialize)]
+struct ExecTestVector {
+    #[serde(default)]
+    argv: Vec<String>,
+    stdin: Option<String>,
+    stdout: Option<OutputPattern>,
+    stderr: Option<OutputPattern>,
+    rc: Option<i32>,
+}
+
+/// Output pattern — either exact string or regex
+#[derive(Debug, serde::Deserialize)]
+struct OutputPattern {
+    pattern: String,
+    is_regex: Option<bool>,
 }
 
 #[cfg(test)]
@@ -239,9 +391,10 @@ mod tests {
             path: PathBuf::from("/tmp/test"),
             translated_rust_path: PathBuf::from("/tmp/test/translated_rust"),
             test_swap_path: PathBuf::from("/tmp/test/translated_rust"),
-            runner_path: PathBuf::from("/tmp/test/runner"),
+            runner_path: Some(PathBuf::from("/tmp/test/runner")),
             test_vectors_path: PathBuf::from("/tmp/test/test_vectors"),
             source_type: crate::translation::SourceType::Rust,
+            program_type: crate::translation::ProgramType::Library,
         }
     }
 
@@ -285,5 +438,47 @@ mod tests {
         assert_eq!(result.total, 5);
         assert_eq!(result.passed, 0);
         assert_eq!(result.failed, 5);
+    }
+
+    #[test]
+    fn test_check_pattern_exact() {
+        assert!(TestRunner::check_pattern("hello\n", "hello\n", false));
+        assert!(!TestRunner::check_pattern("hello\n", "world\n", false));
+    }
+
+    #[test]
+    fn test_check_pattern_regex() {
+        assert!(TestRunner::check_pattern("abc123", "abc[0-9]+", true));
+        assert!(!TestRunner::check_pattern("abcxyz", "abc[0-9]+", true));
+    }
+
+    #[test]
+    fn test_parse_exec_test_vector() {
+        let json = r#"{
+            "argv": ["1", "2"],
+            "stdin": "",
+            "stdout": { "pattern": "3\n" }
+        }"#;
+        let tv: ExecTestVector = serde_json::from_str(json).unwrap();
+        assert_eq!(tv.argv, vec!["1", "2"]);
+        assert_eq!(tv.stdin.as_deref(), Some(""));
+        assert_eq!(tv.stdout.as_ref().unwrap().pattern, "3\n");
+        assert!(tv.stderr.is_none());
+        assert!(tv.rc.is_none());
+    }
+
+    #[test]
+    fn test_parse_exec_test_vector_with_regex() {
+        let json = r#"{
+            "argv": [],
+            "stdin": "test\n",
+            "stdout": { "pattern": "result: [0-9]+", "is_regex": true },
+            "stderr": { "pattern": "" },
+            "rc": 0
+        }"#;
+        let tv: ExecTestVector = serde_json::from_str(json).unwrap();
+        assert!(tv.argv.is_empty());
+        assert_eq!(tv.stdout.as_ref().unwrap().is_regex, Some(true));
+        assert_eq!(tv.rc, Some(0));
     }
 }

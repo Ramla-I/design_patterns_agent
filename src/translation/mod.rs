@@ -27,6 +27,15 @@ pub enum SourceType {
     C,
 }
 
+/// Whether the program is a library (tested via cando2 dlopen) or an executable (tested via stdin/stdout)
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProgramType {
+    /// Library program tested via cando2 dlopen (has runner/)
+    Library,
+    /// Executable program tested via stdin/stdout (no runner/)
+    Executable,
+}
+
 /// Configuration for the translation pipeline
 #[derive(Debug, Clone)]
 pub struct TranslationConfig {
@@ -47,7 +56,7 @@ pub struct TranslationConfig {
 impl Default for TranslationConfig {
     fn default() -> Self {
         Self {
-            max_retries: 5,
+            max_retries: 2,
             max_lines: 2000,
             analyze_patterns: false,
             cando2_path: "../../../../tools/cando2".to_string(),
@@ -70,12 +79,14 @@ pub struct ProgramInfo {
     pub translated_rust_path: PathBuf,
     /// Path that the test runner should symlink-swap (may differ from translated_rust_path for C source)
     pub test_swap_path: PathBuf,
-    /// Path to the runner directory
-    pub runner_path: PathBuf,
+    /// Path to the runner directory (None for executable programs)
+    pub runner_path: Option<PathBuf>,
     /// Path to test vectors directory
     pub test_vectors_path: PathBuf,
     /// Whether the source is Rust or C code
     pub source_type: SourceType,
+    /// Whether this is a library or executable program
+    pub program_type: ProgramType,
 }
 
 /// Main orchestrator for the translation pipeline
@@ -92,12 +103,17 @@ impl TranslationAgent {
     /// Discover all programs in the given path that can be translated.
     /// Prefers `translated_rust/` (crat output), falls back to `dst/<name>/` (raw c2rust),
     /// then `test_case/` (raw C source).
+    ///
+    /// Programs are classified as:
+    /// - **Library** (`runner/` + `test_vectors/`): tested via cando2 dlopen harness
+    /// - **Executable** (`test_vectors/` only, no `runner/`): tested via stdin/stdout comparison
     pub fn discover_programs(&self, path: &Path) -> Result<Vec<ProgramInfo>> {
         let mut programs = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
         // Walk the directory looking for program directories.
-        // A program directory contains runner/ + test_vectors/ + (translated_rust/ or dst/ or test_case/).
+        // A program directory contains test_vectors/ + (translated_rust/ or dst/ or test_case/).
+        // If runner/ also exists, it's a Library; otherwise it's an Executable.
         // min_depth=0 so we also check if `path` itself is a program directory.
         for entry in WalkDir::new(path)
             .min_depth(0)
@@ -113,10 +129,17 @@ impl TranslationAgent {
             let runner_path = program_dir.join("runner");
             let test_vectors_path = program_dir.join("test_vectors");
 
-            // Must have runner and test_vectors
-            if !runner_path.exists() || !test_vectors_path.exists() {
+            // Must have test_vectors at minimum
+            if !test_vectors_path.exists() {
                 continue;
             }
+
+            // Determine program type based on runner/ presence
+            let program_type = if runner_path.exists() {
+                ProgramType::Library
+            } else {
+                ProgramType::Executable
+            };
 
             // Deduplicate — don't re-discover nested directories
             if !seen.insert(program_dir.to_path_buf()) {
@@ -150,47 +173,57 @@ impl TranslationAgent {
                 .unwrap_or("unknown")
                 .to_string();
 
-            // The cando2 runner always dlopen's from <program_dir>/translated_rust/target/release/.
-            // So test_swap_path must always be <program_dir>/translated_rust/.
             let translated_rust = program_dir.join("translated_rust");
             let dst_nested = program_dir.join("dst").join(&program_name);
-            let swap_path = translated_rust.clone();
 
-            // Find the Rust source path
-            let rust_path = if translated_rust.join("src").join("lib.rs").exists()
-                || translated_rust.join("lib.rs").exists()
-            {
-                Some(translated_rust.clone())
-            } else if dst_nested.join("src").join("lib.rs").exists()
-                || dst_nested.join("lib.rs").exists()
-            {
-                Some(dst_nested.clone())
+            // For library programs, cando2 dlopen's from <program_dir>/translated_rust/target/release/.
+            // For executables, we don't need a swap path (set to empty PathBuf).
+            let swap_path = if program_type == ProgramType::Library {
+                translated_rust.clone()
             } else {
-                // Try first subdirectory of dst/
-                let dst_dir = program_dir.join("dst");
-                let mut found = None;
-                if dst_dir.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&dst_dir) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            if entry.path().is_dir() && entry.path().join("lib.rs").exists() {
-                                found = Some(entry.path());
-                                break;
-                            }
-                        }
-                    }
-                }
-                found
+                PathBuf::new()
             };
 
+            let runner_path_opt = if program_type == ProgramType::Library {
+                Some(runner_path)
+            } else {
+                None
+            };
+
+            // Determine what source files to look for based on program type
+            let look_for_main = program_type == ProgramType::Executable;
+
+            // Find the Rust source path
+            let rust_path = self.find_rust_source(
+                &translated_rust,
+                &dst_nested,
+                program_dir,
+                look_for_main,
+            );
+
             let test_case_dir = program_dir.join("test_case");
-            let has_c_source = test_case_dir.join("src").join("lib.c").exists();
+            let has_c_source = if look_for_main {
+                // For executables, any .c file in test_case/src/ counts
+                test_case_dir.join("src").exists() && {
+                    std::fs::read_dir(test_case_dir.join("src"))
+                        .ok()
+                        .map(|entries| {
+                            entries.filter_map(|e| e.ok()).any(|e| {
+                                e.path().extension().map_or(false, |ext| ext == "c")
+                            })
+                        })
+                        .unwrap_or(false)
+                }
+            } else {
+                test_case_dir.join("src").join("lib.c").exists()
+            };
 
             // Resolve source directory and type.
             // When --from-c is set, prefer test_case/ with C source.
             // Otherwise: prefer translated_rust/, fall back to dst/<name>/, then test_case/.
             if self.config.from_c && has_c_source {
-                // Ensure translated_rust/ exists so the symlink swap has something to rename
-                if !swap_path.exists() {
+                // For library programs, ensure translated_rust/ exists so the symlink swap has something to rename
+                if program_type == ProgramType::Library && !swap_path.exists() {
                     let _ = std::fs::create_dir_all(&swap_path);
                 }
                 programs.push(ProgramInfo {
@@ -199,9 +232,10 @@ impl TranslationAgent {
                     path: program_dir.to_path_buf(),
                     translated_rust_path: test_case_dir,
                     test_swap_path: swap_path,
-                    runner_path,
+                    runner_path: runner_path_opt,
                     test_vectors_path,
                     source_type: SourceType::C,
+                    program_type,
                 });
                 continue;
             }
@@ -213,13 +247,14 @@ impl TranslationAgent {
                     path: program_dir.to_path_buf(),
                     test_swap_path: swap_path,
                     translated_rust_path: source_path,
-                    runner_path,
+                    runner_path: runner_path_opt,
                     test_vectors_path,
                     source_type: SourceType::Rust,
+                    program_type,
                 });
             } else if has_c_source {
                 // Fall back to C source from test_case/
-                if !swap_path.exists() {
+                if program_type == ProgramType::Library && !swap_path.exists() {
                     let _ = std::fs::create_dir_all(&swap_path);
                 }
                 programs.push(ProgramInfo {
@@ -228,9 +263,10 @@ impl TranslationAgent {
                     path: program_dir.to_path_buf(),
                     translated_rust_path: test_case_dir,
                     test_swap_path: swap_path,
-                    runner_path,
+                    runner_path: runner_path_opt,
                     test_vectors_path,
                     source_type: SourceType::C,
+                    program_type,
                 });
             }
             // else: no source found, skip
@@ -244,23 +280,83 @@ impl TranslationAgent {
         Ok(programs)
     }
 
+    /// Find Rust source path for a program. Checks translated_rust/, dst/<name>/, and
+    /// first subdirectory of dst/. For executables (`look_for_main`), also checks for
+    /// main.rs and src/main.rs in addition to lib.rs.
+    fn find_rust_source(
+        &self,
+        translated_rust: &Path,
+        dst_nested: &Path,
+        program_dir: &Path,
+        look_for_main: bool,
+    ) -> Option<PathBuf> {
+        let has_source = |dir: &Path| -> bool {
+            dir.join("src").join("lib.rs").exists()
+                || dir.join("lib.rs").exists()
+                || (look_for_main
+                    && (dir.join("src").join("main.rs").exists()
+                        || dir.join("main.rs").exists()))
+        };
+
+        let has_any_rs_in_src = |dir: &Path| -> bool {
+            if !look_for_main {
+                return false;
+            }
+            let src = dir.join("src");
+            if !src.exists() {
+                return false;
+            }
+            std::fs::read_dir(&src)
+                .ok()
+                .map(|entries| {
+                    entries.filter_map(|e| e.ok()).any(|e| {
+                        e.path().extension().map_or(false, |ext| ext == "rs")
+                    })
+                })
+                .unwrap_or(false)
+        };
+
+        if has_source(translated_rust) || has_any_rs_in_src(translated_rust) {
+            return Some(translated_rust.to_path_buf());
+        }
+        if has_source(dst_nested) || has_any_rs_in_src(dst_nested) {
+            return Some(dst_nested.to_path_buf());
+        }
+
+        // Try first subdirectory of dst/
+        let dst_dir = program_dir.join("dst");
+        if dst_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&dst_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let p = entry.path();
+                    if p.is_dir() && (has_source(&p) || has_any_rs_in_src(&p)) {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Collect all C source code from a test_case/ directory into a single string.
-    /// Reads header files from include/ and source files from src/.
+    /// Reads header files from include/ and inc/, and source files from src/.
     fn collect_c_source_code(&self, test_case_dir: &Path) -> Result<String> {
         let mut parts = Vec::new();
 
-        // Read header files from include/
-        let include_dir = test_case_dir.join("include");
-        if include_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&include_dir) {
-                let mut headers: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                headers.sort_by_key(|e| e.file_name());
-                for entry in headers {
-                    let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "h") {
-                        let content = std::fs::read_to_string(&path)
-                            .with_context(|| format!("Failed to read {}", path.display()))?;
-                        parts.push(format!("// === {} ===\n{}", path.file_name().unwrap().to_string_lossy(), content));
+        // Read header files from include/ and inc/ (qmath uses inc/)
+        for header_dir_name in &["include", "inc"] {
+            let header_dir = test_case_dir.join(header_dir_name);
+            if header_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&header_dir) {
+                    let mut headers: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                    headers.sort_by_key(|e| e.file_name());
+                    for entry in headers {
+                        let path = entry.path();
+                        if path.extension().map_or(false, |ext| ext == "h") {
+                            let content = std::fs::read_to_string(&path)
+                                .with_context(|| format!("Failed to read {}", path.display()))?;
+                            parts.push(format!("// === {} ===\n{}", path.file_name().unwrap().to_string_lossy(), content));
+                        }
                     }
                 }
             }
@@ -291,16 +387,23 @@ impl TranslationAgent {
     }
 
     /// Collect all Rust source code from a program directory into a single string.
-    /// Reads lib.rs and src/lib.rs (skipping mod.rs and build.rs), combining them
-    /// so the LLM sees the full picture.
+    /// Reads lib.rs/main.rs and src/lib.rs/src/main.rs/src/*.rs (skipping mod.rs and build.rs),
+    /// combining them so the LLM sees the full picture.
     fn collect_source_code(&self, source_dir: &Path) -> Result<String> {
         let mut parts = Vec::new();
 
-        // Read the top-level lib.rs (crate attributes and module declarations)
-        let top_lib = source_dir.join("lib.rs");
-        if top_lib.exists() {
-            let content = std::fs::read_to_string(&top_lib)
-                .with_context(|| format!("Failed to read {}", top_lib.display()))?;
+        // Read the top-level lib.rs or main.rs (crate attributes and module declarations)
+        let top_file = if source_dir.join("lib.rs").exists() {
+            Some(source_dir.join("lib.rs"))
+        } else if source_dir.join("main.rs").exists() {
+            Some(source_dir.join("main.rs"))
+        } else {
+            None
+        };
+
+        if let Some(top_path) = top_file {
+            let content = std::fs::read_to_string(&top_path)
+                .with_context(|| format!("Failed to read {}", top_path.display()))?;
             // Only include if it has more than just module declarations
             let has_real_code = content.lines().any(|line| {
                 let trimmed = line.trim();
@@ -338,12 +441,39 @@ impl TranslationAgent {
             }
         }
 
-        // Read src/lib.rs (the actual function implementations)
-        let src_lib = source_dir.join("src").join("lib.rs");
-        if src_lib.exists() {
-            let content = std::fs::read_to_string(&src_lib)
-                .with_context(|| format!("Failed to read {}", src_lib.display()))?;
-            parts.push(content);
+        // Read src/ directory — look for lib.rs, main.rs, and other .rs files
+        let src_dir = source_dir.join("src");
+        if src_dir.exists() {
+            let src_lib = src_dir.join("lib.rs");
+            let src_main = src_dir.join("main.rs");
+            if src_lib.exists() {
+                let content = std::fs::read_to_string(&src_lib)
+                    .with_context(|| format!("Failed to read {}", src_lib.display()))?;
+                parts.push(content);
+            } else if src_main.exists() {
+                let content = std::fs::read_to_string(&src_main)
+                    .with_context(|| format!("Failed to read {}", src_main.display()))?;
+                parts.push(content);
+            }
+
+            // Also read other .rs files in src/ (e.g. src/container_of.rs for executables)
+            if let Ok(entries) = std::fs::read_dir(&src_dir) {
+                let mut sources: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                sources.sort_by_key(|e| e.file_name());
+                for entry in sources {
+                    let path = entry.path();
+                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    // Skip lib.rs, main.rs (already read above), mod.rs, build.rs
+                    if fname == "lib.rs" || fname == "main.rs" || fname == "mod.rs" || fname == "build.rs" {
+                        continue;
+                    }
+                    if path.extension().map_or(false, |ext| ext == "rs") {
+                        let content = std::fs::read_to_string(&path)
+                            .with_context(|| format!("Failed to read {}", path.display()))?;
+                        parts.push(format!("// === {} ===\n{}", fname, content));
+                    }
+                }
+            }
         }
 
         if parts.is_empty() {
@@ -365,7 +495,11 @@ impl TranslationAgent {
                 }
             }
         };
-        println!("📝 Processing: {}/{} [source: {}]", program.collection, program.name, source_label);
+        let type_label = match program.program_type {
+            ProgramType::Library => "lib",
+            ProgramType::Executable => "exe",
+        };
+        println!("📝 Processing: {}/{} [{}] [source: {}]", program.collection, program.name, type_label, source_label);
 
         // Collect source code based on type
         let source_code = match program.source_type {
@@ -406,11 +540,18 @@ impl TranslationAgent {
         }
         std::fs::create_dir_all(&output_dir)?;
 
-        // Copy supporting files: for C source, try dst/ for Cargo.toml etc., or generate them
-        if program.source_type == SourceType::C {
-            self.setup_supporting_files_for_c(program, &output_dir)?;
-        } else {
-            self.copy_supporting_files(&program.translated_rust_path, &output_dir)?;
+        // Copy supporting files based on program type and source type
+        match program.program_type {
+            ProgramType::Executable => {
+                self.setup_supporting_files_for_executable(program, &output_dir)?;
+            }
+            ProgramType::Library => {
+                if program.source_type == SourceType::C {
+                    self.setup_supporting_files_for_c(program, &output_dir)?;
+                } else {
+                    self.copy_supporting_files(&program.translated_rust_path, &output_dir)?;
+                }
+            }
         }
 
         // Initialize components
@@ -420,6 +561,7 @@ impl TranslationAgent {
         let feedback_formatter = FeedbackFormatter::new();
 
         let mut last_feedback: Option<String> = None;
+        let mut last_translated_code: Option<String> = None;
         let mut last_build_error_msg: Option<String> = None;
         let mut attempts = 0;
         let mut cumulative_input_tokens: usize = 0;
@@ -434,7 +576,7 @@ impl TranslationAgent {
 
             // Translate the code
             let translated_code = match translator
-                .translate(&source_code, last_feedback.as_deref(), llm_client.as_ref(), &program.source_type)
+                .translate(&source_code, last_feedback.as_deref(), last_translated_code.as_deref(), llm_client.as_ref(), &program.source_type, &program.program_type)
                 .await
             {
                 Ok(output) => {
@@ -489,9 +631,15 @@ impl TranslationAgent {
                 }
             };
 
-            // Write translated code
-            let output_lib_rs = output_dir.join("lib.rs");
-            std::fs::write(&output_lib_rs, &translated_code)?;
+            // Save for next retry so the LLM can see its previous attempt
+            last_translated_code = Some(translated_code.clone());
+
+            // Write translated code (main.rs for executables, lib.rs for libraries)
+            let output_file = match program.program_type {
+                ProgramType::Executable => output_dir.join("main.rs"),
+                ProgramType::Library => output_dir.join("lib.rs"),
+            };
+            std::fs::write(&output_file, &translated_code)?;
 
             // Build the translation
             println!("   🔨 Building...");
@@ -520,7 +668,7 @@ impl TranslationAgent {
                             total_llm_secs: cumulative_llm_secs,
                         });
                     }
-                    last_feedback = Some(feedback_formatter.format_build_error(&build_error));
+                    last_feedback = Some(feedback_formatter.format_build_error_for(&build_error, &program.program_type));
                     continue;
                 }
             }
@@ -611,7 +759,7 @@ impl TranslationAgent {
                                 total_llm_secs: cumulative_llm_secs,
                             });
                         }
-                        last_feedback = Some(feedback_formatter.format_test_failures(&test_results));
+                        last_feedback = Some(feedback_formatter.format_test_failures_for(&test_results, &program.program_type));
                     }
                 }
                 Err(test_error) => {
@@ -633,7 +781,7 @@ impl TranslationAgent {
                             last_build_error: None,
                         });
                     }
-                    last_feedback = Some(feedback_formatter.format_test_error(&test_error.to_string()));
+                    last_feedback = Some(feedback_formatter.format_test_error_for(&test_error.to_string(), &program.program_type));
                 }
             }
         }
@@ -677,6 +825,69 @@ crate-type = ["cdylib", "staticlib", "rlib"]
                 name = program.name
             );
             std::fs::write(dst.join("Cargo.toml"), cargo_toml)?;
+        }
+
+        Ok(())
+    }
+
+    /// Set up supporting files for an executable program translation.
+    /// Generates a Cargo.toml with [[bin]] instead of [lib].
+    fn setup_supporting_files_for_executable(&self, program: &ProgramInfo, dst: &Path) -> Result<()> {
+        // Try to find supporting files from dst/<name>/ or dst/driver/
+        let dst_nested = program.path.join("dst").join(&program.name);
+        let dst_driver = program.path.join("dst").join("driver");
+
+        let support_src = if dst_nested.join("Cargo.toml").exists() {
+            Some(dst_nested)
+        } else if dst_driver.join("Cargo.toml").exists() {
+            Some(dst_driver)
+        } else {
+            None
+        };
+
+        if let Some(src) = support_src {
+            // Copy supporting files (rust-toolchain, .cargo/, etc.) but generate our own Cargo.toml
+            self.copy_supporting_files_except_cargo(&src, dst)?;
+        }
+
+        // Always generate a fresh executable Cargo.toml
+        let cargo_toml = format!(
+            r#"[package]
+name = "{name}"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "{name}"
+path = "main.rs"
+
+[dependencies]
+"#,
+            name = program.name
+        );
+        std::fs::write(dst.join("Cargo.toml"), cargo_toml)?;
+
+        Ok(())
+    }
+
+    /// Copy supporting files except Cargo.toml (rust-toolchain, .cargo/, build.rs).
+    fn copy_supporting_files_except_cargo(&self, src: &Path, dst: &Path) -> Result<()> {
+        // Copy .cargo directory
+        let cargo_dir = src.join(".cargo");
+        if cargo_dir.exists() {
+            let dst_cargo_dir = dst.join(".cargo");
+            std::fs::create_dir_all(&dst_cargo_dir)?;
+            for entry in std::fs::read_dir(&cargo_dir)? {
+                let entry = entry?;
+                std::fs::copy(entry.path(), dst_cargo_dir.join(entry.file_name()))?;
+            }
+        }
+
+        // Copy rust-toolchain
+        let rust_toolchain = src.join("rust-toolchain");
+        if rust_toolchain.exists() {
+            std::fs::copy(&rust_toolchain, dst.join("rust-toolchain"))?;
         }
 
         Ok(())
@@ -781,6 +992,15 @@ crate-type = ["cdylib", "staticlib", "rlib"]
         let mut failed_count = 0;
         let mut skipped_count = 0;
 
+        // Write CSV header
+        let csv_path = run_dir.join("usage.csv");
+        {
+            use std::io::Write;
+            let mut csv = std::fs::File::create(&csv_path)
+                .with_context(|| format!("Failed to create {}", csv_path.display()))?;
+            writeln!(csv, "program,collection,type,status,attempts,tests_passed,tests_total,idiomaticity,input_tokens,output_tokens,total_tokens,llm_secs")?;
+        }
+
         for (idx, program) in programs.iter().enumerate() {
             println!("\n[{}/{}] {}/{}", idx + 1, programs.len(), program.collection, program.name);
 
@@ -796,6 +1016,31 @@ crate-type = ["cdylib", "staticlib", "rlib"]
             let result_path = run_dir.join(&program.name).join("translated_rust_llm").join("results.json");
             if let Ok(json) = serde_json::to_string_pretty(&result) {
                 let _ = std::fs::write(&result_path, json);
+            }
+
+            // Append row to usage.csv
+            {
+                use std::io::Write;
+                if let Ok(mut csv) = std::fs::OpenOptions::new().append(true).open(&csv_path) {
+                    let type_label = match program.program_type {
+                        ProgramType::Library => "library",
+                        ProgramType::Executable => "executable",
+                    };
+                    let status_str = match result.status {
+                        ProgramStatus::Success => "success",
+                        ProgramStatus::Failed => "failed",
+                        ProgramStatus::Skipped => "skipped",
+                    };
+                    let tests_passed = result.test_vectors.as_ref().map(|t| t.passed).unwrap_or(0);
+                    let tests_total = result.test_vectors.as_ref().map(|t| t.total).unwrap_or(0);
+                    let idiom = result.idiomaticity.as_ref().map(|i| format!("{:.1}", i.score)).unwrap_or_default();
+                    let _ = writeln!(csv, "{},{},{},{},{},{},{},{},{},{},{},{:.1}",
+                        result.program, result.collection, type_label, status_str,
+                        result.attempts, tests_passed, tests_total, idiom,
+                        result.input_tokens, result.output_tokens, result.total_tokens,
+                        result.total_llm_secs,
+                    );
+                }
             }
 
             results.push(result);
@@ -834,8 +1079,8 @@ mod tests {
     #[test]
     fn test_translation_config_default() {
         let config = TranslationConfig::default();
-        assert_eq!(config.max_retries, 5);
-        assert_eq!(config.max_lines, 1000);
+        assert_eq!(config.max_retries, 2);
+        assert_eq!(config.max_lines, 2000);
         assert!(!config.analyze_patterns);
     }
 }

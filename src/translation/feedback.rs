@@ -1,3 +1,4 @@
+use super::ProgramType;
 use super::report::TestVectorResults;
 
 /// Formats error feedback for LLM retry attempts
@@ -10,18 +11,15 @@ impl FeedbackFormatter {
 
     /// Format a build error for feedback
     pub fn format_build_error(&self, error: &anyhow::Error) -> String {
+        self.format_build_error_for(error, &ProgramType::Library)
+    }
+
+    /// Format a build error for feedback, with program-type-aware hints
+    pub fn format_build_error_for(&self, error: &anyhow::Error, program_type: &ProgramType) -> String {
         let error_str = error.to_string();
 
-        format!(
-            r#"## Build Error
-
-The code failed to compile with the following errors:
-
-```
-{}
-```
-
-## Common Issues to Check:
+        let hints = match program_type {
+            ProgramType::Library => r#"## Common Issues to Check:
 1. Missing or incorrect imports
 2. Type mismatches
 3. Lifetime issues
@@ -29,29 +27,38 @@ The code failed to compile with the following errors:
 5. Incorrect FFI function signatures
 
 Please fix these compilation errors while maintaining FFI compatibility."#,
-            self.truncate_output(&error_str, 2000)
+            ProgramType::Executable => r#"## Common Issues to Check:
+1. Missing or incorrect imports
+2. Type mismatches
+3. Lifetime issues
+4. Do not use the `libc` crate — use std equivalents
+5. Ensure fn main() exists
+
+Please fix these compilation errors. This is an executable (not a library)."#,
+        };
+
+        format!(
+            "## Build Error\n\nThe code failed to compile with the following errors:\n\n```\n{}\n```\n\n{}",
+            self.truncate_output(&error_str, 2000),
+            hints,
         )
     }
 
     /// Format test failures for feedback
     pub fn format_test_failures(&self, results: &TestVectorResults) -> String {
+        self.format_test_failures_for(results, &ProgramType::Library)
+    }
+
+    /// Format test failures for feedback, with program-type-aware hints
+    pub fn format_test_failures_for(&self, results: &TestVectorResults, program_type: &ProgramType) -> String {
         let failures_text = if results.failures.is_empty() {
             "No detailed failure information available.".to_string()
         } else {
             results.failures.join("\n\n")
         };
 
-        format!(
-            r#"## Test Failures
-
-The code compiled but {} of {} tests failed.
-
-### Failure Details:
-```
-{}
-```
-
-## Common Causes:
+        let hints = match program_type {
+            ProgramType::Library => r#"## Common Causes:
 1. Incorrect algorithm implementation
 2. Off-by-one errors
 3. Incorrect handling of edge cases
@@ -59,24 +66,34 @@ The code compiled but {} of {} tests failed.
 5. Integer overflow/underflow handling
 
 Please fix the failing tests while keeping FFI signatures unchanged."#,
+            ProgramType::Executable => r#"## Common Causes:
+1. Incorrect algorithm implementation
+2. Off-by-one errors in output
+3. Wrong output format (extra/missing whitespace or newlines)
+4. Incorrect stdin parsing
+5. Wrong exit code
+
+Please fix the failing tests. Match the exact stdout output format."#,
+        };
+
+        format!(
+            "## Test Failures\n\nThe code compiled but {} of {} tests failed.\n\n### Failure Details:\n```\n{}\n```\n\n{}",
             results.failed,
             results.total,
-            self.truncate_output(&failures_text, 2000)
+            self.truncate_output(&failures_text, 2000),
+            hints,
         )
     }
 
     /// Format a test execution error for feedback
     pub fn format_test_error(&self, error: &str) -> String {
-        format!(
-            r#"## Test Execution Error
+        self.format_test_error_for(error, &ProgramType::Library)
+    }
 
-The tests could not be executed due to an error:
-
-```
-{}
-```
-
-## Possible Causes:
+    /// Format a test execution error for feedback, with program-type-aware hints
+    pub fn format_test_error_for(&self, error: &str, program_type: &ProgramType) -> String {
+        let hints = match program_type {
+            ProgramType::Library => r#"## Possible Causes:
 1. Runtime panic
 2. Segmentation fault
 3. Stack overflow
@@ -84,7 +101,20 @@ The tests could not be executed due to an error:
 5. Incorrect FFI calling convention
 
 Please ensure all #[no_mangle] pub extern "C" functions are correctly exported."#,
-            self.truncate_output(error, 2000)
+            ProgramType::Executable => r#"## Possible Causes:
+1. Runtime panic
+2. Segmentation fault
+3. Stack overflow
+4. Infinite loop (program didn't exit)
+5. Missing fn main()
+
+Please ensure the program reads stdin, processes argv, and writes to stdout correctly."#,
+        };
+
+        format!(
+            "## Test Execution Error\n\nThe tests could not be executed due to an error:\n\n```\n{}\n```\n\n{}",
+            self.truncate_output(error, 2000),
+            hints,
         )
     }
 

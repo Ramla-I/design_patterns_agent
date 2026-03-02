@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::time::Instant;
 
 use crate::llm::{LlmClient, LlmRequest};
-use crate::translation::SourceType;
+use crate::translation::{ProgramType, SourceType};
 
 /// Result of a single LLM translation call
 pub struct TranslationOutput {
@@ -21,21 +21,29 @@ impl Translator {
         Self
     }
 
-    /// Translate source code to idiomatic Rust
+    /// Translate source code to idiomatic Rust.
+    /// When retrying, `previous_code` contains the last translation attempt and
+    /// `feedback` describes why it failed — so the LLM can make targeted fixes.
     pub async fn translate(
         &self,
         source_code: &str,
         feedback: Option<&str>,
+        previous_code: Option<&str>,
         llm_client: &dyn LlmClient,
         source_type: &SourceType,
+        program_type: &ProgramType,
     ) -> Result<TranslationOutput> {
-        let system_prompt = match source_type {
-            SourceType::C => self.build_c_system_prompt(),
-            SourceType::Rust => self.build_system_prompt(),
+        let system_prompt = match (source_type, program_type) {
+            (SourceType::C, ProgramType::Executable) => self.build_executable_c_system_prompt(),
+            (SourceType::C, ProgramType::Library) => self.build_c_system_prompt(),
+            (SourceType::Rust, ProgramType::Executable) => self.build_executable_system_prompt(),
+            (SourceType::Rust, ProgramType::Library) => self.build_system_prompt(),
         };
-        let user_prompt = match source_type {
-            SourceType::C => self.build_c_user_prompt(source_code, feedback),
-            SourceType::Rust => self.build_user_prompt(source_code, feedback),
+        let user_prompt = match (source_type, program_type) {
+            (SourceType::C, ProgramType::Executable) => self.build_executable_c_user_prompt(source_code, feedback, previous_code),
+            (SourceType::C, ProgramType::Library) => self.build_c_user_prompt(source_code, feedback, previous_code),
+            (SourceType::Rust, ProgramType::Executable) => self.build_executable_user_prompt(source_code, feedback, previous_code),
+            (SourceType::Rust, ProgramType::Library) => self.build_user_prompt(source_code, feedback, previous_code),
         };
 
         let request = LlmRequest::new(system_prompt, user_prompt)
@@ -80,10 +88,17 @@ Be conservative. When in doubt, preserve original code.
 Output ONLY the code in a ```rust block, no explanations."#.to_string()
     }
 
-    fn build_user_prompt(&self, source_code: &str, feedback: Option<&str>) -> String {
+    fn build_user_prompt(&self, source_code: &str, feedback: Option<&str>, previous_code: Option<&str>) -> String {
         let mut prompt = format!("Transform this C2Rust code to idiomatic Rust:\n\n```rust\n{}\n```", source_code);
 
-        if let Some(feedback) = feedback {
+        if let Some(prev) = previous_code {
+            if let Some(feedback) = feedback {
+                prompt.push_str(&format!(
+                    "\n\nYour previous translation:\n```rust\n{}\n```\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix the specific issues in your previous translation while keeping FFI compatibility.",
+                    prev, feedback
+                ));
+            }
+        } else if let Some(feedback) = feedback {
             prompt.push_str(&format!("\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix these issues while keeping FFI compatibility.", feedback));
         }
 
@@ -116,11 +131,105 @@ Produce a SINGLE lib.rs file with all code.
 Output ONLY the code in a ```rust block, no explanations."#.to_string()
     }
 
-    fn build_c_user_prompt(&self, source_code: &str, feedback: Option<&str>) -> String {
+    fn build_c_user_prompt(&self, source_code: &str, feedback: Option<&str>, previous_code: Option<&str>) -> String {
         let mut prompt = format!("Translate this C code to idiomatic Rust:\n\n```c\n{}\n```", source_code);
 
-        if let Some(feedback) = feedback {
+        if let Some(prev) = previous_code {
+            if let Some(feedback) = feedback {
+                prompt.push_str(&format!(
+                    "\n\nYour previous translation:\n```rust\n{}\n```\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix the specific issues in your previous translation while keeping FFI compatibility.",
+                    prev, feedback
+                ));
+            }
+        } else if let Some(feedback) = feedback {
             prompt.push_str(&format!("\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix these issues while keeping FFI compatibility.", feedback));
+        }
+
+        prompt
+    }
+
+    fn build_executable_system_prompt(&self) -> String {
+        r#"You convert C2Rust executable code to idiomatic Rust.
+
+RULES (violating any = broken program):
+- The output must be a single `main.rs` file with `fn main()`
+- Convert the C2Rust `main_0`/`main` pattern to a clean `fn main()`
+- Convert `argc`/`argv` patterns to `std::env::args()`
+- Convert `printf`/`fprintf` to `print!()`/`eprint!()`/`write!()` — match the EXACT output format
+- Convert `scanf`/`fgets`/`getchar` to `std::io::stdin().read_line()` or similar
+- Convert `atoi`/`atof`/`strtol` to Rust's `.parse()` methods
+- Convert `exit(n)` to `std::process::exit(n)`
+- Keep ALL `#![feature(...)]` and `#![allow(...)]` declarations
+- Preserve the algorithm/logic; only change implementation style
+- Do NOT use the `libc` crate — use `std` equivalents for all I/O and string operations
+- Do NOT use `#[no_mangle]`, `extern "C"`, or any FFI exports
+
+TRANSFORMS (internal code only):
+- malloc/calloc/free → Vec, Box, or Rust allocation
+- Raw pointer arithmetic → slice indexing where safe
+- C-style loops → iterators or for-range
+- Redundant casts → direct literals
+- C string handling → Rust String/&str
+- Use const, meaningful names, Option/Result
+
+Be conservative. Preserve exact output formatting (whitespace, newlines).
+
+Output ONLY the code in a ```rust block, no explanations."#.to_string()
+    }
+
+    fn build_executable_user_prompt(&self, source_code: &str, feedback: Option<&str>, previous_code: Option<&str>) -> String {
+        let mut prompt = format!("Transform this C2Rust executable code to idiomatic Rust:\n\n```rust\n{}\n```", source_code);
+
+        if let Some(prev) = previous_code {
+            if let Some(feedback) = feedback {
+                prompt.push_str(&format!(
+                    "\n\nYour previous translation:\n```rust\n{}\n```\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix the specific issues in your previous translation. This is an executable program (not a library), so use fn main() and std I/O.",
+                    prev, feedback
+                ));
+            }
+        } else if let Some(feedback) = feedback {
+            prompt.push_str(&format!("\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix these issues. This is an executable program (not a library), so use fn main() and std I/O.", feedback));
+        }
+
+        prompt
+    }
+
+    fn build_executable_c_system_prompt(&self) -> String {
+        r#"You translate C executable code to idiomatic Rust.
+
+RULES (violating any = broken program):
+- The output must be a single `main.rs` file with `fn main()`
+- `argc`/`argv` → `std::env::args()`
+- `printf`/`fprintf(stdout, ...)` → `print!()`/`write!()` — match EXACT output format (spacing, newlines)
+- `fprintf(stderr, ...)` → `eprint!()`/`write!(std::io::stderr(), ...)`
+- `scanf`/`fgets`/`getchar`/`getc(stdin)` → `std::io::stdin().read_line()` or `.bytes()`
+- `atoi`/`atof`/`strtol` → `.parse::<i32>()` etc.
+- `exit(n)` → `std::process::exit(n)`
+- `malloc`/`calloc`/`free` → Vec, Box, or Rust allocation
+- Do NOT use the `libc` crate — use only `std` library
+- Do NOT use `#[no_mangle]`, `extern "C"`, or any FFI exports
+- Preserve the algorithm/logic exactly; only change implementation style
+- C structs → Rust structs (no need for #[repr(C)] since there's no FFI boundary)
+- C macros → Rust functions, constants, or inline code
+
+IMPORTANT: The program is tested by comparing stdout output character-by-character.
+Match the exact output format of the original C program.
+
+Output ONLY the code in a ```rust block, no explanations."#.to_string()
+    }
+
+    fn build_executable_c_user_prompt(&self, source_code: &str, feedback: Option<&str>, previous_code: Option<&str>) -> String {
+        let mut prompt = format!("Translate this C executable code to idiomatic Rust:\n\n```c\n{}\n```", source_code);
+
+        if let Some(prev) = previous_code {
+            if let Some(feedback) = feedback {
+                prompt.push_str(&format!(
+                    "\n\nYour previous translation:\n```rust\n{}\n```\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix the specific issues in your previous translation. This is an executable program (not a library), so use fn main() and std I/O. Do not use the libc crate.",
+                    prev, feedback
+                ));
+            }
+        } else if let Some(feedback) = feedback {
+            prompt.push_str(&format!("\n\nPREVIOUS ATTEMPT FAILED with error:\n{}\nFix these issues. This is an executable program (not a library), so use fn main() and std I/O. Do not use the libc crate.", feedback));
         }
 
         prompt
@@ -224,12 +333,25 @@ That's it!"#;
         let translator = Translator::new();
         let code = "fn test() {}";
         let feedback = "Build error: missing semicolon";
+        let prev = "fn broken() {}";
 
-        let prompt = translator.build_user_prompt(code, Some(feedback));
+        let prompt = translator.build_user_prompt(code, Some(feedback), Some(prev));
 
         assert!(prompt.contains(code));
         assert!(prompt.contains(feedback));
-        assert!(prompt.contains("PREVIOUS ATTEMPT FAILED"));
+        assert!(prompt.contains(prev));
+        assert!(prompt.contains("previous translation"));
+    }
+
+    #[test]
+    fn test_user_prompt_no_feedback() {
+        let translator = Translator::new();
+        let code = "fn test() {}";
+
+        let prompt = translator.build_user_prompt(code, None, None);
+
+        assert!(prompt.contains(code));
+        assert!(!prompt.contains("PREVIOUS"));
     }
 
     #[test]
@@ -237,12 +359,54 @@ That's it!"#;
         let translator = Translator::new();
         let code = "void test() {}";
         let feedback = "Build error: missing semicolon";
+        let prev = "fn broken() {}";
 
-        let prompt = translator.build_c_user_prompt(code, Some(feedback));
+        let prompt = translator.build_c_user_prompt(code, Some(feedback), Some(prev));
 
         assert!(prompt.contains(code));
         assert!(prompt.contains(feedback));
-        assert!(prompt.contains("PREVIOUS ATTEMPT FAILED"));
+        assert!(prompt.contains(prev));
         assert!(prompt.contains("```c"));
+    }
+
+    #[test]
+    fn test_executable_system_prompt_no_ffi() {
+        let translator = Translator::new();
+        let prompt = translator.build_executable_system_prompt();
+
+        assert!(prompt.contains("fn main()"));
+        assert!(prompt.contains("main.rs"));
+        // Prompt should tell the LLM NOT to use FFI
+        assert!(prompt.contains("Do NOT use"));
+        assert!(prompt.contains("libc"));
+        assert!(prompt.contains("std::env::args"));
+    }
+
+    #[test]
+    fn test_executable_c_system_prompt_no_ffi() {
+        let translator = Translator::new();
+        let prompt = translator.build_executable_c_system_prompt();
+
+        assert!(prompt.contains("fn main()"));
+        assert!(prompt.contains("main.rs"));
+        // Prompt should tell the LLM NOT to use FFI
+        assert!(prompt.contains("Do NOT use"));
+        assert!(prompt.contains("stdout"));
+        assert!(prompt.contains("libc"));
+    }
+
+    #[test]
+    fn test_executable_user_prompt_with_feedback() {
+        let translator = Translator::new();
+        let code = "fn main_0() {}";
+        let feedback = "stdout mismatch";
+        let prev = "fn main() { println!(\"wrong\"); }";
+
+        let prompt = translator.build_executable_user_prompt(code, Some(feedback), Some(prev));
+
+        assert!(prompt.contains(code));
+        assert!(prompt.contains(prev));
+        assert!(prompt.contains("previous translation"));
+        assert!(prompt.contains("executable"));
     }
 }
