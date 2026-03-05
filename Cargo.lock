@@ -344,6 +344,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "llm_translation",
  "proc-macro2",
  "quote",
  "regex",
@@ -865,6 +866,25 @@ name = "litemap"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
+
+[[package]]
+name = "llm_translation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-trait",
+ "chrono",
+ "clap",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "walkdir",
+]
 
 [[package]]
 name = "lock_api"

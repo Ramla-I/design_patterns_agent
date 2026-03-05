@@ -56,6 +56,7 @@ pub enum Command {
     },
 
     /// Translate C2Rust or C code to idiomatic Rust
+    #[cfg(feature = "translation")]
     Translate {
         /// Paths to Public-Tests directories or specific programs
         #[arg(value_name = "PATH", required = true)]
@@ -139,6 +140,7 @@ pub async fn run() -> Result<()> {
         Some(Command::Analyze { path }) => {
             run_analyze(&cli, path).await
         }
+        #[cfg(feature = "translation")]
         Some(Command::Translate { paths, max_retries, max_lines, analyze, skip_tests, from_c, report }) => {
             run_translate(&cli, paths, *max_retries, *max_lines, *analyze, *skip_tests, *from_c, report.as_ref()).await
         }
@@ -187,17 +189,18 @@ async fn run_analyze(cli: &Cli, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "translation")]
 async fn run_translate(
     cli: &Cli,
     paths: &[PathBuf],
     max_retries: usize,
     max_lines: usize,
-    analyze: bool,
+    _analyze: bool,
     skip_tests: bool,
     from_c: bool,
     report_path: Option<&PathBuf>,
 ) -> Result<()> {
-    use crate::translation::{TranslationAgent, TranslationConfig};
+    use llm_translation::{TranslationAgent, TranslationConfig};
 
     // Validate paths
     for path in paths {
@@ -206,28 +209,26 @@ async fn run_translate(
         }
     }
 
-    // Create a dummy Args for Config creation (use first path)
-    let args = Args::from_cli(cli, paths[0].clone());
-
-    // Load configuration
-    let llm_config = if let Some(config_path) = &args.config {
-        Config::from_file(config_path)?
-    } else {
-        Config::from_args(&args)?
-    };
+    // Resolve API key
+    let api_key = cli
+        .api_key
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("API key not provided. Set OPENAI_API_KEY or use --api-key"))?;
 
     // Create translation config
     let translation_config = TranslationConfig {
         max_retries,
         max_lines,
-        analyze_patterns: analyze,
+        analyze_patterns: false,
         skip_tests,
         from_c,
+        api_key,
+        model: cli.model.clone(),
         ..Default::default()
     };
 
     // Create and run the translation agent
-    let agent = TranslationAgent::new(translation_config, llm_config);
+    let agent = TranslationAgent::new(translation_config);
     let report = agent.translate_all(paths).await?;
 
     // Write report
@@ -290,6 +291,7 @@ mod tests {
         assert_eq!(args.model, "gpt-4-turbo");
     }
 
+    #[cfg(feature = "translation")]
     #[test]
     fn test_translate_command_parsing() {
         let cli = Cli::parse_from(&[

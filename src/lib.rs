@@ -5,4 +5,6 @@ pub mod agent;
 pub mod detection;
 pub mod llm;
 pub mod report;
-pub mod translation;
+
+#[cfg(feature = "translation")]
+pub use llm_translation;

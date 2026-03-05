@@ -3,6 +3,10 @@ name = "design_patterns_agent"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["translation"]
+translation = ["dep:llm_translation"]
+
 [dependencies]
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -39,6 +43,9 @@ regex = "1.10"
 
 # Time
 chrono = "0.4"
+
+# Translation (optional)
+llm_translation = { path = "../llm_translation", optional = true }
 
 [dev-dependencies]
 tempfile = "3.13"
