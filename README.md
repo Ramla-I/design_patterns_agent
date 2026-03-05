@@ -1,42 +1,37 @@
 # Design Patterns Agent
 
-An AI-powered Rust tool that discovers invariants in Rust codebases and translates C2Rust output to idiomatic Rust using LLM technology.
+An AI-powered Rust tool that analyzes Rust codebases to automatically discover and document invariants using LLM technology.
 
 ## What It Does
 
-### Invariant Analysis
-
-Analyzes Rust projects to automatically identify and document:
+Analyzes Rust projects to identify:
 
 - **State Machine Invariants**: Typestate patterns using `PhantomData` to enforce compile-time state transitions
 - **Linear Type Invariants**: Ordering requirements and capability patterns that ensure operations happen in sequence
 - **Ownership Invariants**: Lifetime and borrowing patterns that enforce memory safety
 
-### C2Rust / C Translation
+Optionally includes a **translation subcommand** (via the [`llm_translation`](../llm_translation) crate) for converting C2Rust or C code to idiomatic Rust. This feature is enabled by default and can be excluded at build time.
 
-Translates mechanically-generated C2Rust code **or raw C source** into idiomatic, safe Rust:
-
-- Accepts C2Rust output (`translated_rust/`, `dst/`) or raw C code (`test_case/`) as input
-- Iterative LLM-powered translation with build and test feedback loops
-- Clippy-based idiomaticity scoring
-- Automatic retry on build/test failures (up to configurable max)
-- Test vector validation via the `cando2` harness
-- Organized output in timestamped run directories (`runs/<model>_<timestamp>/`)
-
-## Quick Start
-
-### Prerequisites
+## Prerequisites
 
 - Rust toolchain (1.70+)
 - OpenAI-compatible API key
 
-### Installation
+## Installation
 
 ```bash
-git clone https://github.com/yourusername/design_patterns_agent.git
+git clone <repo-url>
 cd design_patterns_agent
 cargo build --release
 ```
+
+To build **without** the translation feature (analysis only):
+
+```bash
+cargo build --release --no-default-features
+```
+
+## Usage
 
 ### Invariant Analysis
 
@@ -49,76 +44,60 @@ cargo run --release -- analyze /path/to/rust/project
 # Save output to a file
 cargo run --release -- analyze /path/to/rust/project --output report.md
 
-# Get JSON output
+# JSON output
 cargo run --release -- analyze /path/to/rust/project --format json --output report.json
+
+# With a config file
+cargo run --release -- analyze /path/to/rust/project --config config.toml
+
+# Shorthand (path without subcommand defaults to analyze)
+cargo run --release -- /path/to/rust/project
 ```
 
-### C2Rust Translation
+### Translation (requires `translation` feature)
+
+The `translate` subcommand is a thin wrapper around the [`llm_translation`](../llm_translation) crate. For full translation documentation, see that repo's README.
 
 ```bash
-export OPENAI_API_KEY=sk-...
-
-# Translate all programs in a test suite directory
-cargo run --release -- translate Public-Tests/
-
-# Translate a single program
-cargo run --release -- translate Public-Tests/B01_organic/bin2hex_lib
+# Translate programs from a test suite
+cargo run --release -- translate /path/to/Public-Tests/B01_organic/bin2hex_lib
 
 # With options
-cargo run --release -- translate Public-Tests/ \
-  --model gpt-4 \
+cargo run --release -- translate /path/to/Public-Tests/ \
   --max-retries 3 \
-  --max-lines 500 \
-  --report extra_copy.md
-
-# Build-only mode (skip test vectors)
-cargo run --release -- translate Public-Tests/ --skip-tests
-
-# Include design pattern analysis on successful translations
-cargo run --release -- translate Public-Tests/ --analyze
+  --from-c \
+  --skip-tests
 ```
 
-### C Source Translation
+### CLI Options
 
-Programs with a `test_case/` directory containing raw C source (`src/lib.c`, `include/lib.h`)
-can be translated directly to Rust without requiring a prior C2Rust pass.
+**Global options:**
 
-```bash
-# Auto-detected: if no Rust source is found, test_case/ C source is used as fallback
-cargo run --release -- translate Public-Tests/B02_organic/arr_del_lib
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-key <KEY>` | `$OPENAI_API_KEY` | OpenAI API key |
+| `--model <MODEL>` | gpt-5.2 | LLM model name |
+| `--format <FMT>` | markdown | Output format: `markdown` or `json` |
+| `--output <PATH>` | stdout | Write output to this file |
+| `--config <PATH>` | none | TOML config file |
 
-# Force C source mode (use test_case/ even when C2Rust output exists)
-cargo run --release -- translate Public-Tests/ --from-c
-```
+**`analyze` options:**
 
-Expected `test_case/` layout:
-```
-program_name/
-  test_case/
-    src/lib.c          # C implementation
-    include/lib.h      # C header
-  runner/              # cando2 test harness
-  test_vectors/        # JSON test inputs/outputs
-```
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-depth` | 10 | Maximum module exploration depth |
+| `--max-items-per-module` | 50 | Max items to analyze per module |
 
-When translating from C source, the tool reuses `Cargo.toml` and build files from `dst/` if
-available, or generates a minimal `Cargo.toml` automatically.
+**`translate` options:**
 
-Translation outputs are saved to `runs/<model>_<YYYYMMDD>_<HHMMSS>/` with the structure:
-
-```
-runs/
-  gpt-4_20260216_153000/
-    bin2hex_lib/
-      translated_rust_llm/
-        lib.rs
-        Cargo.toml
-        results.json
-    bitwriter_add_lib/
-      translated_rust_llm/
-        ...
-    report.md
-```
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-retries` | 5 | Max LLM retry attempts per program |
+| `--max-lines` | 2000 | Skip source files exceeding this line count |
+| `--skip-tests` | false | Only verify build succeeds |
+| `--from-c` | false | Translate from C source (`test_case/`) |
+| `--analyze` | false | Run invariant analysis on successful translations |
+| `--report <PATH>` | none | Write an extra copy of the report |
 
 ## Configuration
 
@@ -127,25 +106,19 @@ Create a `config.toml` file:
 ```toml
 [llm]
 provider = "openai"
-api_key_env = "OPENAI_API_KEY"
+api_key = "sk-..."  # Or use OPENAI_API_KEY env var
 model = "gpt-4"
 
 [exploration]
 max_depth = 10
 max_items_per_module = 50
+context_window_tokens = 4000
 
 [detection]
 focus = ["state_machine", "linear_types", "ownership"]
 ```
 
-Use it with:
-```bash
-cargo run -- analyze /path/to/project --config config.toml
-```
-
 ## How It Works
-
-### Analysis Pipeline
 
 1. **Parse**: Uses `syn` to parse Rust source files and extract type definitions, functions, and traits
 2. **Navigate**: Performs top-down exploration of the module hierarchy
@@ -153,27 +126,45 @@ cargo run -- analyze /path/to/project --config config.toml
 4. **Analyze**: Uses LLM to analyze each pattern and identify invariants
 5. **Report**: Generates a detailed report with code evidence and explanations
 
-### Translation Pipeline
-
-1. **Discover**: Walks the directory tree to find programs with `runner/` and `test_vectors/`
-2. **Collect**: Gathers source from `translated_rust/` (crat), `dst/` (raw c2rust), or `test_case/` (raw C)
-3. **Translate**: Sends source to LLM with a source-type-specific prompt (C2Rust→Rust or C→Rust)
-4. **Build**: Compiles the translation with `cargo build --release`
-5. **Test**: Runs test vectors via the `cando2` harness (symlink-swaps the candidate library)
-6. **Feedback**: On failure, sends build errors or test diffs back to the LLM for another attempt
-7. **Score**: Runs clippy analysis and computes an idiomaticity score
-8. **Report**: Generates a per-run report with results for every program
-
 ## Architecture
 
-- **CLI** (`src/cli/`): Argument parsing with `clap`, subcommands for `analyze` and `translate`
-- **Parser** (`src/parser/`): Rust AST extraction using `syn`
-- **Navigator** (`src/navigation/`): Hierarchical codebase exploration
-- **Detectors** (`src/detection/`): Specialized invariant detectors (state machine, linear types, ownership)
-- **Translation** (`src/translation/`): LLM translator, test runner, clippy analyzer, feedback formatter, report generation
-- **LLM Integration** (`src/llm/`): Async OpenAI-compatible API client behind a trait
-- **Report Generator** (`src/report/`): Markdown and JSON output for analysis reports
-- **Tools** (`tools/`): `cando`/`cando2` test harnesses, helper scripts
+```
+src/
+  main.rs                    # Entry point
+  cli/
+    mod.rs                   # CLI parsing, subcommand dispatch
+    config.rs                # TOML config loading
+  parser/
+    ast.rs                   # Rust AST extraction (syn)
+    module_graph.rs          # Crate module hierarchy
+  navigation/
+    explorer.rs              # Top-down module traversal
+    context.rs               # Identifies interesting code items
+  detection/
+    state_machine.rs         # Typestate pattern detector
+    linear_types.rs          # Ordering invariant detector
+    ownership.rs             # Lifetime pattern detector
+    evidence.rs              # Code snippet extraction
+  agent/
+    mod.rs                   # Main analysis orchestrator
+  llm/
+    types.rs                 # LlmClient trait
+    openai.rs                # OpenAI implementation
+  report/
+    markdown.rs              # Markdown output
+    json.rs                  # JSON output
+```
+
+### Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `translation` | on | Enables `translate` subcommand via `llm_translation` crate |
+
+The `llm_translation` dependency is declared as:
+```toml
+llm_translation = { path = "../llm_translation", optional = true }
+```
 
 ## Development
 
@@ -182,29 +173,18 @@ cargo run -- analyze /path/to/project --config config.toml
 cargo test
 
 # Run tests for a specific module
-cargo test translation
 cargo test parser
+cargo test navigation
 cargo test detection
+
+# Build without translation
+cargo build --no-default-features
 
 # Check code
 cargo check
-
-# Build for release
-cargo build --release
 ```
 
 For detailed development documentation, see [CLAUDE.md](CLAUDE.md).
-
-## Project Status
-
-- ✅ Invariant discovery (state machine, linear types, ownership)
-- ✅ Markdown and JSON reports
-- ✅ OpenAI-compatible LLM integration
-- ✅ C2Rust to idiomatic Rust translation pipeline
-- ✅ Direct C to Rust translation (--from-c)
-- ✅ Iterative build/test feedback loop
-- ✅ Clippy idiomaticity scoring
-- ✅ Timestamped run directories for output organization
 
 ## License
 
