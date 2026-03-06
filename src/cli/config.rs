@@ -44,14 +44,22 @@ impl Config {
     }
 
     pub fn from_args(args: &super::Args) -> Result<Self> {
-        let api_key = args
-            .api_key
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("API key not provided. Set OPENAI_API_KEY or use --api-key"))?;
+        let api_key = args.api_key.clone().or_else(|| {
+            match args.provider.as_str() {
+                "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
+                _ => None,
+            }
+        }).ok_or_else(|| {
+            let env_var = match args.provider.as_str() {
+                "anthropic" => "ANTHROPIC_API_KEY",
+                _ => "OPENAI_API_KEY",
+            };
+            anyhow::anyhow!("API key not provided. Set {} or use --api-key", env_var)
+        })?;
 
         Ok(Config {
             llm: LlmConfig {
-                provider: "openai".to_string(),
+                provider: args.provider.clone(),
                 api_key,
                 model: args.model.clone(),
             },

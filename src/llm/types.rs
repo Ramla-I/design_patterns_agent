@@ -14,6 +14,8 @@ pub struct LlmResponse {
     pub tokens_used: usize,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    pub cached_tokens: usize,
+    pub reasoning_tokens: usize,
 }
 
 #[async_trait]

@@ -55,16 +55,28 @@ impl LlmClient for OpenAIClient {
             .and_then(|choice| choice.message.content.clone())
             .ok_or_else(|| anyhow::anyhow!("No response content from OpenAI"))?;
 
-        let (tokens_used, prompt_tokens, completion_tokens) = response
+        let (tokens_used, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens) = response
             .usage
-            .map(|u| (u.total_tokens as usize, u.prompt_tokens as usize, u.completion_tokens as usize))
-            .unwrap_or((0, 0, 0));
+            .map(|u| {
+                let cached = u.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens)
+                    .unwrap_or(0) as usize;
+                let reasoning = u.completion_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.reasoning_tokens)
+                    .unwrap_or(0) as usize;
+                (u.total_tokens as usize, u.prompt_tokens as usize, u.completion_tokens as usize, cached, reasoning)
+            })
+            .unwrap_or((0, 0, 0, 0, 0));
 
         Ok(LlmResponse {
             content,
             tokens_used,
             prompt_tokens,
             completion_tokens,
+            cached_tokens,
+            reasoning_tokens,
         })
     }
 }

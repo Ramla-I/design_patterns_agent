@@ -37,7 +37,11 @@ pub struct Cli {
     #[arg(long, default_value = "50", global = true)]
     pub max_items_per_module: usize,
 
-    /// OpenAI API key (or set OPENAI_API_KEY env var)
+    /// LLM provider to use ("openai" or "anthropic")
+    #[arg(long, default_value = "openai", global = true)]
+    pub provider: String,
+
+    /// API key (or set OPENAI_API_KEY / ANTHROPIC_API_KEY env var)
     #[arg(long, env = "OPENAI_API_KEY", global = true)]
     pub api_key: Option<String>,
 
@@ -103,6 +107,7 @@ pub struct Args {
     pub config: Option<PathBuf>,
     pub max_depth: usize,
     pub max_items_per_module: usize,
+    pub provider: String,
     pub api_key: Option<String>,
     pub model: String,
 }
@@ -116,6 +121,7 @@ impl Args {
             config: cli.config.clone(),
             max_depth: cli.max_depth,
             max_items_per_module: cli.max_items_per_module,
+            provider: cli.provider.clone(),
             api_key: cli.api_key.clone(),
             model: cli.model.clone(),
         }
@@ -210,10 +216,18 @@ async fn run_translate(
     }
 
     // Resolve API key
-    let api_key = cli
-        .api_key
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("API key not provided. Set OPENAI_API_KEY or use --api-key"))?;
+    let api_key = cli.api_key.clone().or_else(|| {
+        match cli.provider.as_str() {
+            "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
+            _ => None,
+        }
+    }).ok_or_else(|| {
+        let env_var = match cli.provider.as_str() {
+            "anthropic" => "ANTHROPIC_API_KEY",
+            _ => "OPENAI_API_KEY",
+        };
+        anyhow::anyhow!("API key not provided. Set {} or use --api-key", env_var)
+    })?;
 
     // Create translation config
     let translation_config = TranslationConfig {
@@ -222,6 +236,7 @@ async fn run_translate(
         analyze_patterns: false,
         skip_tests,
         from_c,
+        provider: cli.provider.clone(),
         api_key,
         model: cli.model.clone(),
         ..Default::default()

@@ -14,6 +14,7 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<Report> {
     // Create LLM client
     println!("🤖 Connecting to LLM provider: {}", config.llm.provider);
     let llm_client = llm::create_client(
+        &config.llm.provider,
         config.llm.api_key.clone(),
         config.llm.model.clone(),
     )?;
