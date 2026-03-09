@@ -5,6 +5,7 @@ mod agent;
 mod detection;
 mod llm;
 mod report;
+mod search;
 
 use anyhow::Result;
 

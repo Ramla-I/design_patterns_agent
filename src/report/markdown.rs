@@ -5,49 +5,48 @@ pub fn generate_markdown(report: &Report) -> Result<String> {
     let mut output = String::new();
 
     // Title
-    output.push_str("# Invariant Analysis Report\n\n");
+    output.push_str("# Latent Invariant Analysis Report\n\n");
 
     // Summary
     output.push_str("## Summary\n\n");
     output.push_str(&format!("- **Total invariants discovered**: {}\n", report.summary.total_invariants));
-    output.push_str(&format!("- **State machine invariants**: {}\n", report.summary.state_machine_count));
-    output.push_str(&format!("- **Linear type invariants**: {}\n", report.summary.linear_type_count));
-    output.push_str(&format!("- **Ownership invariants**: {}\n", report.summary.ownership_count));
+    output.push_str(&format!("- **Temporal ordering**: {}\n", report.summary.temporal_ordering_count));
+    output.push_str(&format!("- **Resource lifecycle**: {}\n", report.summary.resource_lifecycle_count));
+    output.push_str(&format!("- **State machine**: {}\n", report.summary.state_machine_count));
+    output.push_str(&format!("- **Precondition**: {}\n", report.summary.precondition_count));
+    output.push_str(&format!("- **Protocol**: {}\n", report.summary.protocol_count));
     output.push_str(&format!("- **Modules analyzed**: {}\n\n", report.summary.modules_analyzed));
 
     // Group invariants by type
-    let state_machine_invs: Vec<_> = report.invariants.iter()
-        .filter(|i| i.invariant_type == InvariantType::StateMachine)
-        .collect();
-    let linear_type_invs: Vec<_> = report.invariants.iter()
-        .filter(|i| i.invariant_type == InvariantType::LinearType)
-        .collect();
-    let ownership_invs: Vec<_> = report.invariants.iter()
-        .filter(|i| i.invariant_type == InvariantType::Ownership)
-        .collect();
+    let sections: &[(InvariantType, &str)] = &[
+        (InvariantType::TemporalOrdering, "Temporal Ordering Invariants"),
+        (InvariantType::ResourceLifecycle, "Resource Lifecycle Invariants"),
+        (InvariantType::StateMachine, "State Machine Invariants"),
+        (InvariantType::Precondition, "Precondition Invariants"),
+        (InvariantType::Protocol, "Protocol Invariants"),
+    ];
 
-    // State Machine Invariants
-    if !state_machine_invs.is_empty() {
-        output.push_str("## State Machine Invariants\n\n");
-        for inv in state_machine_invs {
-            format_invariant(&mut output, inv)?;
+    for (inv_type, title) in sections {
+        let invs: Vec<_> = report.invariants.iter()
+            .filter(|i| i.invariant_type == *inv_type)
+            .collect();
+
+        if !invs.is_empty() {
+            output.push_str(&format!("## {}\n\n", title));
+            for inv in invs {
+                format_invariant(&mut output, inv)?;
+            }
         }
     }
 
-    // Linear Type Invariants
-    if !linear_type_invs.is_empty() {
-        output.push_str("## Linear Type Invariants\n\n");
-        for inv in linear_type_invs {
-            format_invariant(&mut output, inv)?;
+    // Skipped files section
+    if !report.parse_failures.is_empty() {
+        output.push_str("## Skipped Files\n\n");
+        output.push_str(&format!("{} file(s) could not be parsed:\n\n", report.parse_failures.len()));
+        for (file_path, error) in &report.parse_failures {
+            output.push_str(&format!("- `{}`: {}\n", file_path, error));
         }
-    }
-
-    // Ownership Invariants
-    if !ownership_invs.is_empty() {
-        output.push_str("## Ownership Invariants\n\n");
-        for inv in ownership_invs {
-            format_invariant(&mut output, inv)?;
-        }
+        output.push('\n');
     }
 
     Ok(output)
@@ -59,6 +58,8 @@ fn format_invariant(output: &mut String, inv: &super::Invariant) -> Result<()> {
         inv.location.file_path,
         inv.location.line_start,
         inv.location.line_end));
+    output.push_str(&format!("**Confidence**: {}\n\n", inv.confidence_label()));
+    output.push_str(&format!("**Suggested Pattern**: {}\n\n", inv.suggested_pattern));
     output.push_str(&format!("**Description**: {}\n\n", inv.description));
 
     output.push_str("**Evidence**:\n\n");
@@ -67,7 +68,7 @@ fn format_invariant(output: &mut String, inv: &super::Invariant) -> Result<()> {
     output.push_str("\n```\n\n");
 
     if !inv.evidence.explanation.is_empty() {
-        output.push_str(&format!("**Explanation**: {}\n\n", inv.evidence.explanation));
+        output.push_str(&format!("{}\n\n", inv.evidence.explanation));
     }
 
     output.push_str("---\n\n");
@@ -78,87 +79,59 @@ fn format_invariant(output: &mut String, inv: &super::Invariant) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::{Invariant, Location, Evidence, InvariantType};
+    use crate::report::{Invariant, Location, Evidence, InvariantType, Confidence};
+
+    fn make_invariant(id: usize, inv_type: InvariantType) -> Invariant {
+        Invariant {
+            id,
+            invariant_type: inv_type,
+            title: format!("Test Invariant {}", id),
+            description: "Must call init before use".to_string(),
+            location: Location {
+                file_path: "src/conn.rs".to_string(),
+                line_start: 10,
+                line_end: 50,
+            },
+            evidence: Evidence {
+                code_snippet: "fn init() {}".to_string(),
+                explanation: "Runtime check reveals ordering requirement".to_string(),
+            },
+            suggested_pattern: "typestate".to_string(),
+            confidence: Confidence::High,
+        }
+    }
 
     #[test]
     fn test_generate_empty_report() {
         let report = Report::new();
         let markdown = generate_markdown(&report).unwrap();
 
-        assert!(markdown.contains("# Invariant Analysis Report"));
+        assert!(markdown.contains("# Latent Invariant Analysis Report"));
         assert!(markdown.contains("Total invariants discovered**: 0"));
     }
 
     #[test]
     fn test_generate_report_with_invariant() {
         let mut report = Report::new();
-
-        report.add_invariant(Invariant {
-            id: 1,
-            invariant_type: InvariantType::StateMachine,
-            title: "FileHandle Typestate".to_string(),
-            description: "FileHandle uses typestate pattern".to_string(),
-            location: Location {
-                file_path: "src/file.rs".to_string(),
-                line_start: 45,
-                line_end: 78,
-            },
-            evidence: Evidence {
-                code_snippet: "pub struct FileHandle<S> { ... }".to_string(),
-                explanation: "Files must be opened before reading".to_string(),
-            },
-        });
+        report.add_invariant(make_invariant(1, InvariantType::TemporalOrdering));
 
         let markdown = generate_markdown(&report).unwrap();
 
-        assert!(markdown.contains("## State Machine Invariants"));
-        assert!(markdown.contains("### 1. FileHandle Typestate"));
-        assert!(markdown.contains("`src/file.rs:45-78`"));
-        assert!(markdown.contains("```rust"));
-        assert!(markdown.contains("FileHandle uses typestate pattern"));
+        assert!(markdown.contains("## Temporal Ordering Invariants"));
+        assert!(markdown.contains("### 1. Test Invariant 1"));
+        assert!(markdown.contains("**Confidence**: high"));
+        assert!(markdown.contains("**Suggested Pattern**: typestate"));
     }
 
     #[test]
     fn test_multiple_invariant_types() {
         let mut report = Report::new();
-
-        report.add_invariant(Invariant {
-            id: 1,
-            invariant_type: InvariantType::StateMachine,
-            title: "SM".to_string(),
-            description: "State machine".to_string(),
-            location: Location {
-                file_path: "test.rs".to_string(),
-                line_start: 1,
-                line_end: 10,
-            },
-            evidence: Evidence {
-                code_snippet: "code".to_string(),
-                explanation: "".to_string(),
-            },
-        });
-
-        report.add_invariant(Invariant {
-            id: 2,
-            invariant_type: InvariantType::LinearType,
-            title: "LT".to_string(),
-            description: "Linear type".to_string(),
-            location: Location {
-                file_path: "test.rs".to_string(),
-                line_start: 20,
-                line_end: 30,
-            },
-            evidence: Evidence {
-                code_snippet: "code2".to_string(),
-                explanation: "".to_string(),
-            },
-        });
+        report.add_invariant(make_invariant(1, InvariantType::TemporalOrdering));
+        report.add_invariant(make_invariant(2, InvariantType::ResourceLifecycle));
 
         let markdown = generate_markdown(&report).unwrap();
 
-        assert!(markdown.contains("## State Machine Invariants"));
-        assert!(markdown.contains("## Linear Type Invariants"));
-        assert!(markdown.contains("### 1. SM"));
-        assert!(markdown.contains("### 2. LT"));
+        assert!(markdown.contains("## Temporal Ordering Invariants"));
+        assert!(markdown.contains("## Resource Lifecycle Invariants"));
     }
 }

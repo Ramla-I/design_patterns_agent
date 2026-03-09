@@ -1,9 +1,13 @@
 mod anthropic;
 mod openai;
+pub mod retry;
+pub mod tracking;
 mod types;
 
 pub use anthropic::AnthropicClient;
 pub use openai::OpenAIClient;
+pub use retry::RetryClient;
+pub use tracking::TokenTrackingClient;
 pub use types::{LlmClient, LlmRequest, LlmResponse};
 
 use anyhow::Result;

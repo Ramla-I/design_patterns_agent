@@ -1,67 +1,38 @@
-mod state_machine;
-mod linear_types;
-mod ownership;
 mod evidence;
 mod invariant_inference;
 
-pub use state_machine::StateMachineDetector;
-pub use linear_types::LinearTypeDetector;
-pub use ownership::OwnershipDetector;
 pub use evidence::EvidenceExtractor;
 pub use invariant_inference::InvariantInferenceDetector;
 
+use std::sync::atomic::AtomicUsize;
+
 use anyhow::Result;
 
-use crate::llm::{LlmClient, LlmRequest};
-use crate::navigation::{CodeContext, InterestingItem};
-use crate::report::{Evidence, Invariant, InvariantType, Location};
+use crate::llm::LlmClient;
+use crate::navigation::AnalysisChunk;
+use crate::report::Invariant;
 
-/// Coordinator for all invariant detection strategies
+/// Coordinator for invariant detection — routes all analysis through
+/// the latent invariant inference detector.
 pub struct InvariantDetector {
-    invariant_inference: InvariantInferenceDetector,
-    state_machine: StateMachineDetector,
-    linear_type: LinearTypeDetector,
-    ownership: OwnershipDetector,
+    inference: InvariantInferenceDetector,
 }
 
 impl InvariantDetector {
     pub fn new() -> Self {
         Self {
-            invariant_inference: InvariantInferenceDetector::new(),
-            state_machine: StateMachineDetector::new(),
-            linear_type: LinearTypeDetector::new(),
-            ownership: OwnershipDetector::new(),
+            inference: InvariantInferenceDetector::new(),
         }
     }
 
-    /// Detect invariants in a code context using the appropriate detector
+    /// Detect latent invariants in a module analysis chunk
     pub async fn detect(
         &self,
-        context: &CodeContext,
+        chunk: &AnalysisChunk,
         llm_client: &dyn LlmClient,
-        next_id: &mut usize,
+        next_id: &AtomicUsize,
     ) -> Result<Vec<Invariant>> {
-        match &context.item {
-            // New: Use invariant inference for structs and impl blocks
-            InterestingItem::StructWithImpls { .. } |
-            InterestingItem::StandaloneImpl { .. } => {
-                self.invariant_inference.detect(context, llm_client, next_id).await
-            }
-            // Legacy detectors for backwards compatibility
-            InterestingItem::TypeStateCandidate { .. } => {
-                self.state_machine.detect(context, llm_client, next_id).await
-            }
-            InterestingItem::LinearTypeCandidate { .. } => {
-                self.linear_type.detect(context, llm_client, next_id).await
-            }
-            InterestingItem::StateTransition { .. } => {
-                self.state_machine.detect(context, llm_client, next_id).await
-            }
-            InterestingItem::Generic { .. } => {
-                // For generic items, use invariant inference
-                self.invariant_inference.detect(context, llm_client, next_id).await
-            }
-        }
+        self.inference.detect(chunk, llm_client, next_id).await
     }
 }
 
@@ -78,6 +49,5 @@ mod tests {
     #[test]
     fn test_detector_creation() {
         let _detector = InvariantDetector::new();
-        // Just test that it can be created without panicking
     }
 }

@@ -1,109 +1,108 @@
-use crate::navigation::{CodeContext, InterestingItem};
-use crate::parser::{ImplBlock, StructDef};
+use crate::navigation::AnalysisChunk;
 
-/// Extract code evidence for invariant detection
+/// Extract code evidence for LLM analysis from an analysis chunk.
+/// Prefers raw source (preserves comments) over reconstructed AST.
 pub struct EvidenceExtractor;
 
 impl EvidenceExtractor {
-    pub fn extract_code_snippet(context: &CodeContext) -> String {
-        match &context.item {
-            InterestingItem::StructWithImpls { struct_def, impl_blocks } => {
-                Self::format_struct_with_impls(struct_def, impl_blocks)
+    /// Format a chunk's content for LLM consumption.
+    /// Uses raw source when available, falls back to structured reconstruction.
+    pub fn format_chunk(chunk: &AnalysisChunk) -> String {
+        // Prefer raw source — it preserves comments which are critical for latent invariant detection
+        if !chunk.raw_source.is_empty() {
+            let mut output = String::new();
+
+            if let Some(ref sibling) = chunk.sibling_summary {
+                output.push_str(&format!("// Note: {}\n\n", sibling));
             }
-            InterestingItem::StandaloneImpl { impl_block } => {
-                Self::format_impl_block(impl_block)
-            }
-            InterestingItem::TypeStateCandidate { struct_def, impl_blocks } => {
-                Self::format_typestate(struct_def, impl_blocks)
-            }
-            InterestingItem::LinearTypeCandidate { struct_def, impl_blocks } => {
-                Self::format_linear_type(struct_def, impl_blocks)
-            }
-            InterestingItem::StateTransition { impl_block } => {
-                Self::format_impl_block(impl_block)
-            }
-            InterestingItem::Generic { .. } => {
-                "// Generic interesting item".to_string()
-            }
+
+            output.push_str(&chunk.raw_source);
+            return output;
         }
+
+        // Fallback: reconstruct from structured data
+        Self::reconstruct_from_ast(chunk)
     }
 
-    fn format_struct_with_impls(struct_def: &StructDef, impl_blocks: &[ImplBlock]) -> String {
+    fn reconstruct_from_ast(chunk: &AnalysisChunk) -> String {
         let mut output = String::new();
 
-        // Format the struct with any doc comments
-        if let Some(doc) = &struct_def.doc_comment {
-            output.push_str(&format!("/// {}\n", doc));
-        }
-        output.push_str(&format!("pub struct {}{} {{\n", struct_def.name, struct_def.generics));
-        for field in &struct_def.fields {
-            output.push_str(&format!("    {}: {},\n", field.name, field.ty));
-        }
-        output.push_str("}\n\n");
-
-        // Format all impl blocks
-        for impl_block in impl_blocks {
-            output.push_str(&Self::format_impl_block(impl_block));
-            output.push_str("\n\n");
+        if let Some(ref sibling) = chunk.sibling_summary {
+            output.push_str(&format!("// Note: {}\n\n", sibling));
         }
 
-        output
-    }
-
-    fn format_typestate(struct_def: &StructDef, impl_blocks: &[ImplBlock]) -> String {
-        let mut output = String::new();
-
-        // Format the struct
-        output.push_str(&format!("pub struct {}{} {{\n", struct_def.name, struct_def.generics));
-        for field in &struct_def.fields {
-            output.push_str(&format!("    {}: {},\n", field.name, field.ty));
-        }
-        output.push_str("}\n\n");
-
-        // Format relevant impl blocks
-        for impl_block in impl_blocks {
-            output.push_str(&Self::format_impl_block(impl_block));
-            output.push_str("\n");
+        for s in &chunk.structs {
+            if let Some(doc) = &s.doc_comment {
+                for line in doc.lines() {
+                    output.push_str(&format!("///{}\n", line));
+                }
+            }
+            output.push_str(&format!("pub struct {}{} {{\n", s.name, s.generics));
+            for field in &s.fields {
+                output.push_str(&format!("    {}: {},\n", field.name, field.ty));
+            }
+            output.push_str("}\n\n");
         }
 
-        output
-    }
-
-    fn format_linear_type(struct_def: &StructDef, impl_blocks: &[ImplBlock]) -> String {
-        let mut output = String::new();
-
-        // Format the struct
-        output.push_str(&format!("pub struct {} {{\n", struct_def.name));
-        for field in &struct_def.fields {
-            output.push_str(&format!("    {}: {},\n", field.name, field.ty));
+        for e in &chunk.enums {
+            if let Some(doc) = &e.doc_comment {
+                for line in doc.lines() {
+                    output.push_str(&format!("///{}\n", line));
+                }
+            }
+            output.push_str(&format!("pub enum {}{} {{\n", e.name, e.generics));
+            for variant in &e.variants {
+                output.push_str(&format!("    {},\n", variant.name));
+            }
+            output.push_str("}\n\n");
         }
-        output.push_str("}\n\n");
 
-        // Format Drop impl if present
-        for impl_block in impl_blocks {
-            if impl_block.trait_name.as_ref().map_or(false, |t| t.contains("Drop")) {
-                output.push_str(&Self::format_impl_block(impl_block));
-                output.push_str("\n");
+        for t in &chunk.traits {
+            if let Some(doc) = &t.doc_comment {
+                for line in doc.lines() {
+                    output.push_str(&format!("///{}\n", line));
+                }
+            }
+            output.push_str(&format!("pub trait {} {{\n", t.name));
+            for method in &t.methods {
+                output.push_str(&format!("    fn {}(...);\n", method));
+            }
+            output.push_str("}\n\n");
+        }
+
+        for imp in &chunk.impl_blocks {
+            if let Some(trait_name) = &imp.trait_name {
+                output.push_str(&format!("impl {} for {} {{\n", trait_name, imp.type_name));
+            } else {
+                output.push_str(&format!("impl {} {{\n", imp.type_name));
+            }
+            for method in &imp.methods {
+                if let Some(doc) = &method.doc_comment {
+                    for line in doc.lines() {
+                        output.push_str(&format!("    ///{}\n", line));
+                    }
+                }
+                if let Some(body) = &method.body_summary {
+                    output.push_str(&format!("    {} {{\n        {}\n    }}\n", method.signature, body));
+                } else {
+                    output.push_str(&format!("    {} {{ ... }}\n", method.signature));
+                }
+            }
+            output.push_str("}\n\n");
+        }
+
+        for f in &chunk.functions {
+            if let Some(doc) = &f.doc_comment {
+                for line in doc.lines() {
+                    output.push_str(&format!("///{}\n", line));
+                }
+            }
+            if let Some(body) = &f.body_summary {
+                output.push_str(&format!("{} {{\n    {}\n}}\n\n", f.signature, body));
+            } else {
+                output.push_str(&format!("{} {{ ... }}\n\n", f.signature));
             }
         }
-
-        output
-    }
-
-    fn format_impl_block(impl_block: &ImplBlock) -> String {
-        let mut output = String::new();
-
-        if let Some(trait_name) = &impl_block.trait_name {
-            output.push_str(&format!("impl {} for {} {{\n", trait_name, impl_block.type_name));
-        } else {
-            output.push_str(&format!("impl {} {{\n", impl_block.type_name));
-        }
-
-        for method in &impl_block.methods {
-            output.push_str(&format!("    {} {{ ... }}\n", method.signature));
-        }
-
-        output.push_str("}");
 
         output
     }
@@ -112,86 +111,71 @@ impl EvidenceExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{FunctionDef, SelfParam, SourceLocation, Visibility};
+    use crate::parser::{StructDef, Field, SourceLocation, Visibility};
+    use std::path::PathBuf;
 
     #[test]
-    fn test_extract_typestate_snippet() {
-        let struct_def = StructDef {
-            name: "State".to_string(),
-            generics: "<S>".to_string(),
-            fields: vec![],
-            visibility: Visibility::Public,
-            doc_comment: None,
-            has_phantom_data: true,
-            source_location: SourceLocation {
-                file_path: "test.rs".to_string(),
-                line: 1,
-            },
-        };
-
-        let impl_block = ImplBlock {
-            trait_name: None,
-            type_name: "State<Open>".to_string(),
-            methods: vec![FunctionDef {
-                name: "read".to_string(),
-                signature: "fn read(&self)".to_string(),
-                is_method: true,
-                self_param: Some(SelfParam::Reference),
-                visibility: Visibility::Public,
-                doc_comment: None,
-                source_location: SourceLocation {
-                    file_path: "test.rs".to_string(),
-                    line: 10,
-                },
-            }],
-            source_location: SourceLocation {
-                file_path: "test.rs".to_string(),
-                line: 8,
-            },
-        };
-
-        let context = CodeContext {
-            item: InterestingItem::TypeStateCandidate {
-                struct_def,
-                impl_blocks: vec![impl_block],
-            },
-            surrounding_code: String::new(),
+    fn test_format_chunk_prefers_raw_source() {
+        let chunk = AnalysisChunk {
             module_path: "test".to_string(),
+            file_path: PathBuf::from("test.rs"),
+            raw_source: "// Must call init before use\nfn init() {}\nfn use_it() {}".to_string(),
+            structs: vec![],
+            enums: vec![],
+            functions: vec![],
+            traits: vec![],
+            impl_blocks: vec![],
+            sibling_summary: None,
         };
 
-        let snippet = EvidenceExtractor::extract_code_snippet(&context);
-
-        assert!(snippet.contains("pub struct State<S>"));
-        assert!(snippet.contains("impl State<Open>"));
-        assert!(snippet.contains("fn read(&self)"));
+        let formatted = EvidenceExtractor::format_chunk(&chunk);
+        assert!(formatted.contains("Must call init before use"));
     }
 
     #[test]
-    fn test_format_impl_block() {
-        let impl_block = ImplBlock {
-            trait_name: Some("Drop".to_string()),
-            type_name: "Resource".to_string(),
-            methods: vec![FunctionDef {
-                name: "drop".to_string(),
-                signature: "fn drop(&mut self)".to_string(),
-                is_method: true,
-                self_param: Some(SelfParam::MutReference),
-                visibility: Visibility::Public,
-                doc_comment: None,
-                source_location: SourceLocation {
-                    file_path: "test.rs".to_string(),
-                    line: 20,
-                },
-            }],
-            source_location: SourceLocation {
-                file_path: "test.rs".to_string(),
-                line: 18,
-            },
+    fn test_format_chunk_with_sibling_summary() {
+        let chunk = AnalysisChunk {
+            module_path: "test".to_string(),
+            file_path: PathBuf::from("test.rs"),
+            raw_source: "fn foo() {}".to_string(),
+            structs: vec![],
+            enums: vec![],
+            functions: vec![],
+            traits: vec![],
+            impl_blocks: vec![],
+            sibling_summary: Some("Other parts contain: struct Bar, impl Bar (3 methods)".to_string()),
         };
 
-        let formatted = EvidenceExtractor::format_impl_block(&impl_block);
+        let formatted = EvidenceExtractor::format_chunk(&chunk);
+        assert!(formatted.contains("Note:"));
+        assert!(formatted.contains("struct Bar"));
+    }
 
-        assert!(formatted.contains("impl Drop for Resource"));
-        assert!(formatted.contains("fn drop(&mut self)"));
+    #[test]
+    fn test_reconstruct_from_ast_fallback() {
+        let chunk = AnalysisChunk {
+            module_path: "test".to_string(),
+            file_path: PathBuf::from("test.rs"),
+            raw_source: String::new(),
+            structs: vec![StructDef {
+                name: "Conn".to_string(),
+                generics: String::new(),
+                fields: vec![Field { name: "open".to_string(), ty: "bool".to_string() }],
+                visibility: Visibility::Public,
+                doc_comment: Some(" A connection".to_string()),
+                has_phantom_data: false,
+                source_location: SourceLocation { file_path: "test.rs".to_string(), line: 1 },
+            }],
+            enums: vec![],
+            functions: vec![],
+            traits: vec![],
+            impl_blocks: vec![],
+            sibling_summary: None,
+        };
+
+        let formatted = EvidenceExtractor::format_chunk(&chunk);
+        assert!(formatted.contains("pub struct Conn"));
+        assert!(formatted.contains("open: bool"));
+        assert!(formatted.contains("A connection"));
     }
 }

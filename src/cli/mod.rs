@@ -1,4 +1,4 @@
-mod config;
+pub mod config;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -33,9 +33,17 @@ pub struct Cli {
     #[arg(long, default_value = "10", global = true)]
     pub max_depth: usize,
 
-    /// Maximum items to analyze per module
+    /// Maximum items to analyze per module (legacy, used in exhaustive mode)
     #[arg(long, default_value = "50", global = true)]
     pub max_items_per_module: usize,
+
+    /// Search mode: "exhaustive" (parse all modules) or "semantic" (use octocode)
+    #[arg(long, default_value = "exhaustive", global = true)]
+    pub search_mode: String,
+
+    /// Minimum similarity threshold for semantic search (0.0-1.0)
+    #[arg(long, default_value = "0.1", global = true)]
+    pub similarity_threshold: f32,
 
     /// LLM provider to use ("openai" or "anthropic")
     #[arg(long, default_value = "openai", global = true)]
@@ -48,6 +56,34 @@ pub struct Cli {
     /// LLM model to use
     #[arg(long, default_value = "gpt-5.2", global = true)]
     pub model: String,
+
+    /// Number of concurrent LLM calls
+    #[arg(long, default_value = "1", global = true)]
+    pub concurrency: usize,
+
+    /// Maximum token budget (0 = unlimited)
+    #[arg(long, default_value = "0", global = true)]
+    pub token_budget: usize,
+
+    /// Path to existing progress.jsonl to resume from
+    #[arg(long, global = true)]
+    pub resume: Option<PathBuf>,
+
+    /// Comma-separated module prefixes to prioritize (e.g. sync,io,fs,net,cell)
+    #[arg(long, value_delimiter = ',', global = true)]
+    pub priority_modules: Vec<String>,
+
+    /// Discover and analyze multiple crates under one directory
+    #[arg(long, global = true)]
+    pub multi_crate: bool,
+
+    /// Maximum retries per LLM call on transient errors (rate limits, timeouts)
+    #[arg(long, default_value = "5", global = true)]
+    pub max_retries: u32,
+
+    /// Base delay in seconds for exponential backoff between retries
+    #[arg(long, default_value = "2", global = true)]
+    pub retry_base_delay: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -110,6 +146,15 @@ pub struct Args {
     pub provider: String,
     pub api_key: Option<String>,
     pub model: String,
+    pub search_mode: String,
+    pub similarity_threshold: f32,
+    pub concurrency: usize,
+    pub token_budget: usize,
+    pub resume_path: Option<PathBuf>,
+    pub priority_modules: Vec<String>,
+    pub multi_crate: bool,
+    pub max_retries: u32,
+    pub retry_base_delay: u64,
 }
 
 impl Args {
@@ -124,6 +169,15 @@ impl Args {
             provider: cli.provider.clone(),
             api_key: cli.api_key.clone(),
             model: cli.model.clone(),
+            search_mode: cli.search_mode.clone(),
+            similarity_threshold: cli.similarity_threshold,
+            concurrency: cli.concurrency,
+            token_budget: cli.token_budget,
+            resume_path: cli.resume.clone(),
+            priority_modules: cli.priority_modules.clone(),
+            multi_crate: cli.multi_crate,
+            max_retries: cli.max_retries,
+            retry_base_delay: cli.retry_base_delay,
         }
     }
 
@@ -177,19 +231,27 @@ async fn run_analyze(cli: &Cli, path: &PathBuf) -> Result<()> {
     }
 
     // Run the analysis
-    let report = crate::agent::analyze_codebase(path, &config).await?;
+    let (report, run_dir) = crate::agent::analyze_codebase(path, &config).await?;
 
     // Generate output
+    let ext = match args.format {
+        OutputFormat::Markdown => "md",
+        OutputFormat::Json => "json",
+    };
     let output = match args.format {
         OutputFormat::Markdown => crate::report::generate_markdown(&report)?,
         OutputFormat::Json => crate::report::generate_json(&report)?,
     };
 
-    // Write to file or stdout
+    // Write report to the run directory created by the agent
+    let run_report_path = run_dir.join(format!("report.{}", ext));
+    std::fs::write(&run_report_path, &output)?;
+    println!("Report written to: {}", run_report_path.display());
+
+    // If --output was given, also write a copy there
     if let Some(output_path) = args.output {
-        std::fs::write(output_path, output)?;
-    } else {
-        println!("{}", output);
+        std::fs::write(&output_path, &output)?;
+        println!("Report copy written to: {}", output_path.display());
     }
 
     Ok(())
@@ -233,7 +295,6 @@ async fn run_translate(
     let translation_config = TranslationConfig {
         max_retries,
         max_lines,
-        analyze_patterns: false,
         skip_tests,
         from_c,
         provider: cli.provider.clone(),

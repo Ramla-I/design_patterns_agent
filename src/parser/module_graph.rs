@@ -14,35 +14,37 @@ pub struct Module {
     pub is_root: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParseFailure {
+    pub file_path: String,
+    pub error: String,
+}
+
 #[derive(Debug)]
 pub struct ModuleGraph {
     modules: HashMap<String, Module>,
     root_module: String,
+    pub parse_failures: Vec<ParseFailure>,
 }
 
 impl ModuleGraph {
     /// Build a module graph from a crate root
     pub fn from_crate_root(root_path: &Path) -> Result<Self> {
-        // Determine the source directory based on project structure
-        // Standard layout: root_path is /project/src/lib.rs, src_dir is /project/src
-        // Flat layout: root_path is /project/lib.rs, src_dir is /project
+        Self::from_crate_root_with_prefix(root_path, None)
+    }
+
+    /// Build a module graph from a crate root, optionally prefixing module names
+    fn from_crate_root_with_prefix(root_path: &Path, crate_prefix: Option<&str>) -> Result<Self> {
         let root_parent = root_path.parent().unwrap();
         let is_standard_layout = root_parent.file_name().map_or(false, |n| n == "src");
-        let src_dir = if is_standard_layout {
-            // Standard layout: src/lib.rs
-            root_parent.to_path_buf()
-        } else {
-            // Flat layout: lib.rs in root directory
-            root_parent.to_path_buf()
-        };
+        let src_dir = root_parent.to_path_buf();
 
         let mut modules = HashMap::new();
         let mut discovered_modules = HashSet::new();
+        let mut parse_failures = Vec::new();
 
-        // Collect all directories to scan for .rs files
         let mut dirs_to_scan = vec![src_dir.clone()];
 
-        // For flat layouts, also check for src/ subdirectory with additional modules
         if !is_standard_layout {
             let potential_src = root_parent.join("src");
             if potential_src.exists() && potential_src.is_dir() {
@@ -50,7 +52,6 @@ impl ModuleGraph {
             }
         }
 
-        // Parse all Rust files in source directories
         for scan_dir in &dirs_to_scan {
             for entry in WalkDir::new(scan_dir)
                 .into_iter()
@@ -59,9 +60,20 @@ impl ModuleGraph {
                 .filter(|e| !e.path().to_string_lossy().contains("/target/"))
             {
                 let file_path = entry.path();
-                let module_name = match Self::path_to_module_name(&src_dir, file_path) {
+                let raw_module_name = match Self::path_to_module_name(&src_dir, file_path) {
                     Ok(name) => name,
-                    Err(_) => continue, // Skip files we can't determine module name for
+                    Err(_) => continue,
+                };
+
+                // Apply crate prefix: "crate" -> "std", "sync::mutex" -> "std::sync::mutex"
+                let module_name = if let Some(prefix) = crate_prefix {
+                    if raw_module_name == "crate" {
+                        prefix.to_string()
+                    } else {
+                        format!("{}::{}", prefix, raw_module_name)
+                    }
+                } else {
+                    raw_module_name
                 };
 
                 if discovered_modules.contains(&module_name) {
@@ -69,22 +81,35 @@ impl ModuleGraph {
                 }
                 discovered_modules.insert(module_name.clone());
 
-                // Try to parse the file, skip if it fails (some files may have syntax not supported by syn)
-                let items = match crate::parser::read_and_parse(file_path) {
+                // Tolerant parse: try normal first, then strip feature gates
+                let content = match std::fs::read_to_string(file_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        parse_failures.push(ParseFailure {
+                            file_path: file_path.to_string_lossy().to_string(),
+                            error: format!("read error: {}", e),
+                        });
+                        continue;
+                    }
+                };
+
+                let items = match crate::parser::parse_file_tolerant(file_path, &content) {
                     Ok(items) => items,
-                    Err(_) => {
-                        // Still register the module but with empty items
-                        // This allows us to continue analyzing other files
+                    Err(e) => {
+                        let err_msg = format!("{}", e);
+                        eprintln!("  Warning: skipping {} (syn parse error: {})", file_path.display(), err_msg);
+                        parse_failures.push(ParseFailure {
+                            file_path: file_path.to_string_lossy().to_string(),
+                            error: err_msg,
+                        });
                         vec![]
                     }
                 };
 
-                // Determine if this is the root module
                 let is_root = file_path
                     .file_name()
                     .map_or(false, |name| name == "lib.rs" || name == "main.rs");
 
-                // Collect submodule declarations (don't fail on error)
                 let submodules = Self::find_submodule_declarations(file_path).unwrap_or_default();
 
                 modules.insert(
@@ -100,7 +125,6 @@ impl ModuleGraph {
             }
         }
 
-        // Find the root module
         let root_module = modules
             .iter()
             .find(|(_, m)| m.is_root)
@@ -110,6 +134,49 @@ impl ModuleGraph {
         Ok(Self {
             modules,
             root_module,
+            parse_failures,
+        })
+    }
+
+    /// Build a merged module graph from multiple crate roots (multi-crate workspace)
+    pub fn from_workspace(crate_roots: Vec<(String, PathBuf)>) -> Result<Self> {
+        let mut all_modules = HashMap::new();
+        let mut all_failures = Vec::new();
+        let mut root_names = Vec::new();
+
+        for (crate_name, root_path) in &crate_roots {
+            match Self::from_crate_root_with_prefix(root_path, Some(crate_name)) {
+                Ok(graph) => {
+                    root_names.push(crate_name.clone());
+                    all_failures.extend(graph.parse_failures);
+                    for (name, module) in graph.modules {
+                        all_modules.insert(name, module);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Warning: failed to parse crate {}: {}", crate_name, e);
+                    all_failures.push(ParseFailure {
+                        file_path: root_path.to_string_lossy().to_string(),
+                        error: format!("crate parse failed: {}", e),
+                    });
+                }
+            }
+        }
+
+        // Create a synthetic workspace root
+        let workspace_root = Module {
+            name: "workspace".to_string(),
+            path: PathBuf::new(),
+            items: vec![],
+            submodules: root_names,
+            is_root: true,
+        };
+        all_modules.insert("workspace".to_string(), workspace_root);
+
+        Ok(Self {
+            modules: all_modules,
+            root_module: "workspace".to_string(),
+            parse_failures: all_failures,
         })
     }
 
@@ -181,13 +248,37 @@ impl ModuleGraph {
 
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("mod ") && !trimmed.starts_with("mod tests") {
-                if let Some(name) = trimmed
-                    .strip_prefix("mod ")
-                    .and_then(|s| s.split(';').next())
-                    .map(|s| s.trim().to_string())
-                {
-                    submodules.push(name);
+
+            // Skip comments
+            if trimmed.starts_with("//") || trimmed.starts_with("/*") {
+                continue;
+            }
+
+            // Strip visibility qualifiers to find "mod <name>"
+            // Handles: mod foo; | pub mod foo; | pub(crate) mod foo; | pub(super) mod foo;
+            let after_vis = if trimmed.starts_with("pub(") {
+                // pub(crate) mod ..., pub(super) mod ...
+                if let Some(paren_end) = trimmed.find(')') {
+                    trimmed[paren_end + 1..].trim_start()
+                } else {
+                    continue;
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("pub ") {
+                rest.trim_start()
+            } else {
+                trimmed
+            };
+
+            if let Some(rest) = after_vis.strip_prefix("mod ") {
+                // Extract module name from "mod <name>;", "mod <name> {", etc.
+                let name = rest
+                    .split(|c: char| c == ';' || c == '{' || c.is_whitespace())
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+
+                if !name.is_empty() && name != "tests" {
+                    submodules.push(name.to_string());
                 }
             }
         }
@@ -251,5 +342,30 @@ mod tests {
 
         let name = ModuleGraph::path_to_module_name(src, file).unwrap();
         assert_eq!(name, "foo::bar");
+    }
+
+    #[test]
+    fn test_pub_mod_declarations() {
+        let temp_dir = TempDir::new().unwrap();
+        let src_dir = temp_dir.path().join("src");
+        fs::create_dir(&src_dir).unwrap();
+
+        fs::write(
+            src_dir.join("lib.rs"),
+            "pub mod foo;\npub(crate) mod bar;\nmod baz;\n// mod commented_out;\n",
+        )
+        .unwrap();
+        fs::write(src_dir.join("foo.rs"), "pub fn foo() {}").unwrap();
+        fs::write(src_dir.join("bar.rs"), "pub fn bar() {}").unwrap();
+        fs::write(src_dir.join("baz.rs"), "pub fn baz() {}").unwrap();
+
+        let root_path = src_dir.join("lib.rs");
+        let graph = ModuleGraph::from_crate_root(&root_path).unwrap();
+        let root = graph.root();
+
+        assert!(root.submodules.contains(&"foo".to_string()));
+        assert!(root.submodules.contains(&"bar".to_string()));
+        assert!(root.submodules.contains(&"baz".to_string()));
+        assert!(!root.submodules.contains(&"commented_out".to_string()));
     }
 }

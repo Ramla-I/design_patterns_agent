@@ -52,6 +52,9 @@ pub struct FunctionDef {
     pub self_param: Option<SelfParam>,
     pub visibility: Visibility,
     pub doc_comment: Option<String>,
+    pub body_summary: Option<String>,
+    pub attributes: Vec<String>,
+    pub is_unsafe: bool,
     pub source_location: SourceLocation,
 }
 
@@ -243,15 +246,42 @@ fn extract_function(item: &ItemFn, path: &Path, is_method: bool) -> Option<Funct
     let visibility = extract_visibility(&item.vis);
     let doc_comment = extract_doc_comment(&item.attrs);
 
+    // Extract function body summary (truncated to 1000 chars)
+    let block = &item.block;
+    let body_text = quote::quote!(#block).to_string();
+    let body_summary = if body_text.len() > 2 {
+        // Strip outer braces
+        let trimmed = body_text.trim();
+        let inner = if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        let inner = inner.trim();
+        if inner.is_empty() {
+            None
+        } else if inner.len() > 1000 {
+            Some(format!("{}...", &inner[..1000]))
+        } else {
+            Some(inner.to_string())
+        }
+    } else {
+        None
+    };
+
+    // Extract non-doc attributes
+    let attributes = extract_attributes(&item.attrs);
+
+    // Check if function is unsafe
+    let is_unsafe = item.sig.unsafety.is_some();
+
     let self_param = if is_method {
         item.sig.inputs.iter().find_map(|arg| {
             if let syn::FnArg::Receiver(receiver) = arg {
-                if receiver.mutability.is_some() {
-                    Some(SelfParam::MutReference)
-                } else if receiver.reference.is_some() {
-                    Some(SelfParam::Reference)
-                } else {
-                    Some(SelfParam::Owned)
+                match (receiver.reference.is_some(), receiver.mutability.is_some()) {
+                    (true, true) => Some(SelfParam::MutReference),   // &mut self
+                    (true, false) => Some(SelfParam::Reference),     // &self
+                    _ => Some(SelfParam::Owned),                     // self or mut self
                 }
             } else {
                 None
@@ -268,9 +298,12 @@ fn extract_function(item: &ItemFn, path: &Path, is_method: bool) -> Option<Funct
         self_param,
         visibility,
         doc_comment,
+        body_summary,
+        attributes,
+        is_unsafe,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1, // Line number tracking would require additional span processing
+            line: 1,
         },
     })
 }
@@ -321,10 +354,7 @@ fn extract_impl(item: &ItemImpl, path: &Path) -> Option<ImplBlock> {
                         attrs: method.attrs.clone(),
                         vis: method.vis.clone(),
                         sig: method.sig.clone(),
-                        block: Box::new(syn::Block {
-                            brace_token: Default::default(),
-                            stmts: vec![],
-                        }),
+                        block: method.block.clone().into(),
                     },
                     path,
                     true,
@@ -335,13 +365,24 @@ fn extract_impl(item: &ItemImpl, path: &Path) -> Option<ImplBlock> {
         })
         .collect();
 
+    // Filter out trivial auto-derived trait impls (exact segment match)
+    if let Some(ref tn) = trait_name {
+        let trivial_traits = ["Debug", "Clone", "Copy", "Default", "Display",
+                              "PartialEq", "Eq", "Hash", "PartialOrd", "Ord"];
+        // Split on :: to get the last segment (e.g., "std::fmt::Debug" → "Debug")
+        let trait_leaf = tn.split("::").last().unwrap_or(tn).trim();
+        if trivial_traits.iter().any(|t| *t == trait_leaf) {
+            return None;
+        }
+    }
+
     Some(ImplBlock {
         trait_name,
         type_name,
         methods,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1, // Line number tracking would require additional span processing
+            line: 1,
         },
     })
 }
@@ -375,6 +416,17 @@ fn extract_visibility(vis: &syn::Visibility) -> Visibility {
         }
         syn::Visibility::Inherited => Visibility::Private,
     }
+}
+
+fn extract_attributes(attrs: &[syn::Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter(|attr| !attr.path().is_ident("doc"))
+        .map(|attr| {
+            let path = attr.path();
+            quote::quote!(#path).to_string()
+        })
+        .collect()
 }
 
 fn extract_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
@@ -453,6 +505,35 @@ impl Foo {
                 assert_eq!(impl_block.methods[0].self_param, Some(SelfParam::Owned));
                 assert_eq!(impl_block.methods[1].self_param, Some(SelfParam::Reference));
                 assert_eq!(impl_block.methods[2].self_param, Some(SelfParam::MutReference));
+            }
+            _ => panic!("Expected impl block"),
+        }
+    }
+
+    #[test]
+    fn test_extract_function_body_and_attributes() {
+        let code = r#"
+impl Connection {
+    #[must_use]
+    pub unsafe fn connect(&mut self) -> bool {
+        if self.is_connected {
+            return false;
+        }
+        self.is_connected = true;
+        true
+    }
+}
+"#;
+        let file = syn::parse_file(code).unwrap();
+        let items = extract_items(&file, Path::new("test.rs"));
+
+        match &items[0] {
+            CodeItem::Impl(impl_block) => {
+                let method = &impl_block.methods[0];
+                assert!(method.body_summary.is_some());
+                assert!(method.body_summary.as_ref().unwrap().contains("is_connected"));
+                assert!(method.is_unsafe);
+                assert!(method.attributes.iter().any(|a| a.contains("must_use")));
             }
             _ => panic!("Expected impl block"),
         }

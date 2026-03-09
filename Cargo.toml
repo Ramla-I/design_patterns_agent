@@ -45,6 +45,9 @@ regex = "1.10"
 # Time
 chrono = "0.4"
 
+# UUID for MCP request IDs
+uuid = { version = "1.0", features = ["v4"] }
+
 # Translation (optional)
 llm_translation = { path = "../llm_translation", optional = true }
 

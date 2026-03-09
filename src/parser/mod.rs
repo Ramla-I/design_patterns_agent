@@ -2,9 +2,9 @@ mod ast;
 mod module_graph;
 
 pub use ast::{
-    CodeItem, EnumDef, FunctionDef, ImplBlock, SelfParam, SourceLocation, StructDef, TraitDef, TypeAlias, Visibility,
+    CodeItem, EnumDef, Field, FunctionDef, ImplBlock, SelfParam, SourceLocation, StructDef, TraitDef, TypeAlias, Visibility,
 };
-pub use module_graph::{Module, ModuleGraph};
+pub use module_graph::{Module, ModuleGraph, ParseFailure};
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -46,6 +46,59 @@ pub fn find_crate_root(dir: &Path) -> Result<PathBuf> {
 pub fn read_and_parse(path: &Path) -> Result<Vec<CodeItem>> {
     let content = std::fs::read_to_string(path)?;
     parse_file(path, &content)
+}
+
+/// Tolerant parse: try syn first, strip #![feature(...)] lines on failure, retry
+pub fn parse_file_tolerant(path: &Path, content: &str) -> Result<Vec<CodeItem>> {
+    match parse_file(path, content) {
+        Ok(items) => Ok(items),
+        Err(_) => {
+            // Strip #![feature(...)] lines and retry
+            let stripped: String = content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !(trimmed.starts_with("#![feature(") || trimmed.starts_with("#![cfg_attr("))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            parse_file(path, &stripped)
+        }
+    }
+}
+
+/// Discover crates in a directory (for multi-crate workspaces like rust stdlib library/)
+pub fn find_workspace_crates(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut crates = Vec::new();
+
+    // Walk immediate subdirectories
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let crate_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        // Skip hidden dirs and common non-crate dirs
+        if crate_name.starts_with('.') || crate_name == "target" {
+            continue;
+        }
+
+        // Look for a crate root
+        if let Ok(root) = find_crate_root(&path) {
+            crates.push((crate_name, root));
+        }
+    }
+
+    // Sort for deterministic order
+    crates.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(crates)
 }
 
 #[cfg(test)]

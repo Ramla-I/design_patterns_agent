@@ -13,8 +13,8 @@ fn test_parse_typestate_example_project() {
         return;
     }
 
-    // Create navigator
-    let navigator = Navigator::new(&test_project, 10, 50);
+    // Create navigator (now takes context_window_tokens instead of max_items_per_module)
+    let navigator = Navigator::new(&test_project, 10, 4000);
 
     match navigator {
         Ok(nav) => {
@@ -23,54 +23,36 @@ fn test_parse_typestate_example_project() {
             println!("Found {} modules in test project", module_count);
             assert!(module_count > 0, "Should find at least one module");
 
-            // Explore the codebase
+            // Explore the codebase — now produces analysis chunks (one or more per module)
             let mut explorer = nav.explore();
-            let interesting_items = explorer.explore();
+            let chunks = explorer.explore();
 
-            println!("Found {} interesting items:", interesting_items.len());
-            for item in &interesting_items {
-                println!("  - {} ({})", item.module_path, item.item.reason());
+            println!("Found {} analysis chunks:", chunks.len());
+            for chunk in &chunks {
+                println!(
+                    "  - module: {}, file: {}, structs: {}, fns: {}, impls: {}",
+                    chunk.module_path,
+                    chunk.file_path.display(),
+                    chunk.structs.len(),
+                    chunk.functions.len(),
+                    chunk.impl_blocks.len(),
+                );
             }
 
-            // We should find interesting items:
-            // - FileHandle<S> with PhantomData (typestate)
-            // - Connection<S> with PhantomData (typestate)
-            // - Builder<S> with PhantomData (typestate)
-            // - Resource with Drop impl (linear type)
-            // - ResourceGuard with Drop impl (linear type)
+            // We should find analysis chunks with content
             assert!(
-                interesting_items.len() >= 3,
-                "Should find at least 3 interesting items (found {})",
-                interesting_items.len()
+                !chunks.is_empty(),
+                "Should find at least one analysis chunk"
             );
 
-            // Verify we found some typestate patterns
-            let typestate_count = interesting_items
-                .iter()
-                .filter(|item| {
-                    matches!(
-                        item.item,
-                        design_patterns_agent::navigation::InterestingItem::TypeStateCandidate { .. }
-                    )
-                })
-                .count();
-
-            println!("Found {} typestate candidates", typestate_count);
-            assert!(typestate_count > 0, "Should find at least one typestate pattern");
-
-            // Verify we found some linear types
-            let linear_type_count = interesting_items
-                .iter()
-                .filter(|item| {
-                    matches!(
-                        item.item,
-                        design_patterns_agent::navigation::InterestingItem::LinearTypeCandidate { .. }
-                    )
-                })
-                .count();
-
-            println!("Found {} linear type candidates", linear_type_count);
-            assert!(linear_type_count > 0, "Should find at least one linear type");
+            // Verify raw source is populated (preserves comments for latent invariant detection)
+            for chunk in &chunks {
+                assert!(
+                    !chunk.raw_source.is_empty(),
+                    "Chunk for {} should have raw source",
+                    chunk.module_path
+                );
+            }
         }
         Err(e) => {
             panic!("Failed to create navigator: {}", e);

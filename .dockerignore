@@ -1,0 +1,10 @@
+target/
+runs/
+.git/
+.DS_Store
+test_projects/
+tools/
+scripts/
+*.md
+!src/**/*.md
+LICENSE

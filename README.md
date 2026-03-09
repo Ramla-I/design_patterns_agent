@@ -1,21 +1,28 @@
 # Design Patterns Agent
 
-An AI-powered Rust tool that analyzes Rust codebases to automatically discover and document invariants using LLM technology.
+An AI-powered Rust tool that analyzes Rust codebases to discover **latent invariants** — implicit protocols, temporal ordering requirements, and state dependencies that exist in code but aren't yet enforced by the type system.
 
 ## What It Does
 
-Analyzes Rust projects to identify:
+The tool scans Rust modules for signals that suggest compile-time guarantees are missing — places where developers rely on runtime checks, comments, naming conventions, or error handling to enforce rules that *could* be compile-time guarantees.
 
-- **State Machine Invariants**: Typestate patterns using `PhantomData` to enforce compile-time state transitions
-- **Linear Type Invariants**: Ordering requirements and capability patterns that ensure operations happen in sequence
-- **Ownership Invariants**: Lifetime and borrowing patterns that enforce memory safety
+**Invariant categories:**
 
-Optionally includes a **translation subcommand** (via the [`llm_translation`](../llm_translation) crate) for converting C2Rust or C code to idiomatic Rust. This feature is enabled by default and can be excluded at build time.
+| Category | What it catches | Example signal |
+|----------|----------------|----------------|
+| **Temporal Ordering** | "must call X before Y" | `// must call init() before use` |
+| **Resource Lifecycle** | "must acquire then release" | open/close pairs, Drop guards |
+| **State Machine** | boolean/enum flags encoding states | `if !self.is_open { return Err("closed") }` |
+| **Precondition** | assertions revealing assumptions | `assert!(!closed)`, `expect("not initialized")` |
+| **Protocol** | multi-step interaction sequences | function groups forming implicit workflows |
+
+For each invariant found, the tool suggests a Rust design pattern to enforce it at compile time — **typestate**, **RAII**, **builder**, **newtype**, **session type**, or **capability passing** — with a confidence level and implementation sketch.
 
 ## Prerequisites
 
 - Rust toolchain (1.70+)
-- OpenAI-compatible API key
+- An LLM API key: **OpenAI** or **Anthropic**
+- Docker (optional, for running the stdlib analysis)
 
 ## Installation
 
@@ -25,10 +32,104 @@ cd design_patterns_agent
 cargo build --release
 ```
 
-To build **without** the translation feature (analysis only):
+To build **without** the optional translation feature (invariant analysis only):
 
 ```bash
 cargo build --release --no-default-features
+```
+
+## Quick Start
+
+```bash
+# Set your API key
+export OPENAI_API_KEY=sk-...
+# or
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Analyze a Rust project
+cargo run --release -- analyze /path/to/rust/project
+
+# Use Anthropic instead of OpenAI
+cargo run --release -- analyze /path/to/rust/project --provider anthropic --model claude-sonnet-4-20250514
+
+# Shorthand — a bare path defaults to the analyze subcommand
+cargo run --release -- /path/to/rust/project
+```
+
+Results are always saved to a timestamped run directory:
+```
+runs/<model>_<YYYYMMDD>_<HHMMSS>/report.md
+```
+Previous runs are never overwritten.
+
+## Running on the Rust Standard Library
+
+The agent supports analyzing large multi-crate workspaces like the Rust standard library (`core`, `alloc`, `std`). A Docker setup and shell script handle everything.
+
+### One-command run
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... ./run_stdlib_test.sh
+```
+
+This builds the Docker image, clones the stdlib, and runs the analysis with sensible defaults (concurrency 5, 1M token budget, priority modules `sync,io,fs,net,cell,collections,thread,process`).
+
+### Customizing the run
+
+```bash
+# Higher concurrency and budget
+./run_stdlib_test.sh --concurrency 10 --token-budget 2000000
+
+# Use a different model
+./run_stdlib_test.sh --model claude-opus-4-6 --concurrency 3
+
+# Use OpenAI
+OPENAI_API_KEY=sk-... ./run_stdlib_test.sh --provider openai --model gpt-4o
+
+# Resume a previous run (retries failed chunks, skips completed ones)
+./run_stdlib_test.sh --resume /workspace/runs/<prev_run>/progress.jsonl
+```
+
+### Running directly with Docker
+
+```bash
+# Build the image
+docker build -t dpa-stdlib .
+
+# Run with defaults
+docker run --rm \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -v ./runs:/workspace/runs \
+  dpa-stdlib
+
+# Override all flags
+docker run --rm \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -v ./runs:/workspace/runs \
+  dpa-stdlib \
+  --multi-crate \
+  --concurrency 10 \
+  --priority-modules sync,io,fs \
+  --provider anthropic \
+  --model claude-opus-4-6 \
+  --token-budget 2000000
+```
+
+### What the Docker image contains
+
+- Multi-stage build: Rust builder compiles the release binary, runtime image is minimal Debian
+- The Rust stdlib source is baked in via sparse git checkout (~250 MB, `.git` removed)
+- Output is written to `/workspace/runs/` — mount a host volume to persist it
+
+### Output files
+
+Each run creates a timestamped directory under `runs/`:
+
+```
+runs/claude-sonnet-4-20250514_20260309_143201/
+  progress.jsonl      # One line per analyzed chunk (status, tokens, timestamp)
+  invariants.jsonl    # One serialized Invariant per line (incremental, survives crashes)
+  report.md           # Final formatted report (generated at end)
 ```
 
 ## Usage
@@ -36,27 +137,59 @@ cargo build --release --no-default-features
 ### Invariant Analysis
 
 ```bash
-export OPENAI_API_KEY=sk-...
-
-# Analyze a Rust codebase
+# Exhaustive mode (default) — parses all modules, 100% coverage
 cargo run --release -- analyze /path/to/rust/project
 
-# Save output to a file
-cargo run --release -- analyze /path/to/rust/project --output report.md
+# Multi-crate workspace (e.g., rust stdlib library/)
+cargo run --release -- analyze /path/to/workspace --multi-crate
+
+# Parallel LLM calls
+cargo run --release -- analyze /path/to/project --concurrency 5
+
+# With token budget limit
+cargo run --release -- analyze /path/to/project --token-budget 500000
+
+# Prioritize specific modules
+cargo run --release -- analyze /path/to/project --multi-crate --priority-modules sync,io,fs,net
+
+# Resume from a previous run
+cargo run --release -- analyze /path/to/project --resume runs/<prev_run>/progress.jsonl
+
+# Semantic search mode — uses octocode for targeted search, faster for large codebases
+cargo run --release -- analyze /path/to/rust/project --search-mode semantic
 
 # JSON output
-cargo run --release -- analyze /path/to/rust/project --format json --output report.json
+cargo run --release -- analyze /path/to/rust/project --format json
 
-# With a config file
+# Use a TOML config file for all settings
 cargo run --release -- analyze /path/to/rust/project --config config.toml
+```
 
-# Shorthand (path without subcommand defaults to analyze)
-cargo run --release -- /path/to/rust/project
+### Search Modes
+
+| Mode | Flag | How it works | Trade-offs |
+|------|------|-------------|------------|
+| **Exhaustive** (default) | `--search-mode exhaustive` | Parses every `.rs` file with `syn`, builds module-level analysis chunks, sends all to LLM | 100% coverage. More expensive for large codebases. |
+| **Semantic** | `--search-mode semantic` | Runs 12 targeted semantic queries via [octocode](https://github.com/Muvon/octocode) for invariant signals. Only sends high-relevance code to LLM. | Much faster and cheaper. May miss signals not covered by the predefined queries. |
+
+**Semantic mode setup** (one-time):
+
+```bash
+# Install octocode
+curl -fsSL https://raw.githubusercontent.com/Muvon/octocode/master/install.sh | sh
+
+# Configure embedding model
+octocode config \
+  --code-embedding-model "openai:text-embedding-3-small" \
+  --text-embedding-model "openai:text-embedding-3-small"
+
+# Index the target codebase
+cd /path/to/rust/project && octocode index
 ```
 
 ### Translation (requires `translation` feature)
 
-The `translate` subcommand is a thin wrapper around the [`llm_translation`](../llm_translation) crate. For full translation documentation, see that repo's README.
+The `translate` subcommand wraps the [`llm_translation`](../llm_translation) crate for converting C2Rust or C code to idiomatic Rust. See that crate's README for full documentation.
 
 ```bash
 # Translate programs from a test suite
@@ -69,90 +202,217 @@ cargo run --release -- translate /path/to/Public-Tests/ \
   --skip-tests
 ```
 
-### CLI Options
+### CLI Reference
 
-**Global options:**
+**Global options** (apply to all subcommands):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--api-key <KEY>` | `$OPENAI_API_KEY` | OpenAI API key |
-| `--model <MODEL>` | gpt-5.2 | LLM model name |
-| `--format <FMT>` | markdown | Output format: `markdown` or `json` |
-| `--output <PATH>` | stdout | Write output to this file |
-| `--config <PATH>` | none | TOML config file |
+| `--api-key <KEY>` | `$OPENAI_API_KEY` / `$ANTHROPIC_API_KEY` | API key |
+| `--provider <NAME>` | `openai` | LLM provider: `openai` or `anthropic` |
+| `--model <MODEL>` | `gpt-5.2` | LLM model name |
+| `--format <FMT>` | `markdown` | Output format: `markdown` or `json` |
+| `--output <PATH>` | — | Write an additional copy of the report |
+| `--config <PATH>` | — | TOML config file |
 
 **`analyze` options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--max-depth` | 10 | Maximum module exploration depth |
-| `--max-items-per-module` | 50 | Max items to analyze per module |
+| `--max-depth <N>` | `10` | Maximum module exploration depth |
+| `--search-mode <MODE>` | `exhaustive` | `exhaustive` or `semantic` |
+| `--similarity-threshold <F>` | `0.1` | Min similarity for semantic search (0.0-1.0) |
+| `--multi-crate` | `false` | Discover and analyze multiple crates under one directory |
+| `--concurrency <N>` | `1` | Number of concurrent LLM calls |
+| `--token-budget <N>` | `0` (unlimited) | Stop after using this many tokens |
+| `--resume <PATH>` | — | Path to `progress.jsonl` from a previous run to resume |
+| `--priority-modules <LIST>` | — | Comma-separated module prefixes to analyze first |
+| `--max-retries <N>` | `5` | Max retries per LLM call on transient errors |
+| `--retry-base-delay <SECS>` | `2` | Base delay for exponential backoff |
 
 **`translate` options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--max-retries` | 5 | Max LLM retry attempts per program |
-| `--max-lines` | 2000 | Skip source files exceeding this line count |
-| `--skip-tests` | false | Only verify build succeeds |
-| `--from-c` | false | Translate from C source (`test_case/`) |
-| `--analyze` | false | Run invariant analysis on successful translations |
-| `--report <PATH>` | none | Write an extra copy of the report |
+| `--max-retries <N>` | `5` | Max LLM retry attempts per program |
+| `--max-lines <N>` | `2000` | Skip source files exceeding this line count |
+| `--skip-tests` | `false` | Only verify build succeeds |
+| `--from-c` | `false` | Translate from C source (`test_case/`) |
+| `--analyze` | `false` | Run invariant analysis on successful translations |
+| `--report <PATH>` | — | Write an extra copy of the report |
+
+## Robustness and Fault Tolerance
+
+The agent is designed for long-running analysis of large codebases:
+
+**Retry with exponential backoff** — Rate limits (429), server errors (500/502/503), Anthropic overload (529), timeouts, and connection errors are retried automatically with exponential backoff and jitter. Server-provided `Retry-After` headers are respected. Consecutive rate limits across all concurrent tasks trigger progressively longer delays.
+
+**Incremental progress** — Every completed chunk is recorded to `progress.jsonl` and every discovered invariant to `invariants.jsonl` as they happen. If the process crashes, no work is lost.
+
+**Resume** — Pass `--resume <path>/progress.jsonl` to skip already-completed chunks. Failed chunks (e.g., rate-limit exhaustion) are automatically retried on resume.
+
+**Token budget** — Set `--token-budget` to cap spending. Once exceeded, remaining chunks are skipped and a partial report is generated.
+
+**Graceful shutdown** — Ctrl+C lets in-flight LLM calls finish, then generates a partial report from results collected so far.
+
+**Tolerant parsing** — Files that fail `syn` parsing (e.g., nightly `#![feature(...)]` attributes) are retried with feature gates stripped. Unparseable files are logged and listed in the report's "Skipped Files" section.
 
 ## Configuration
 
-Create a `config.toml` file:
+All CLI flags can alternatively be set in a `config.toml`:
 
 ```toml
 [llm]
-provider = "openai"
-api_key = "sk-..."  # Or use OPENAI_API_KEY env var
+provider = "openai"       # "openai" or "anthropic"
+api_key = "sk-..."        # Or use OPENAI_API_KEY / ANTHROPIC_API_KEY env var
 model = "gpt-4"
 
 [exploration]
 max_depth = 10
 max_items_per_module = 50
-context_window_tokens = 4000
+context_window_tokens = 4000    # Max tokens per analysis chunk sent to LLM
 
 [detection]
-focus = ["state_machine", "linear_types", "ownership"]
+focus = ["temporal_ordering", "resource_lifecycle", "state_machine", "precondition", "protocol"]
+min_confidence = "medium"       # Filter: "high", "medium", or "low"
+
+[search]
+mode = "exhaustive"             # "exhaustive" or "semantic"
+similarity_threshold = 0.1      # Semantic mode: minimum cosine similarity (0.0-1.0)
+max_results_per_query = 20      # Semantic mode: max results per search query
+context_lines = 30              # Lines of context above/below each match
+
+[execution]
+concurrency = 5
+token_budget = 1000000
+multi_crate = true
+max_retries = 5
+retry_base_delay = 2
+priority_modules = ["sync", "io", "fs", "net", "cell"]
 ```
 
 ## How It Works
 
-1. **Parse**: Uses `syn` to parse Rust source files and extract type definitions, functions, and traits
-2. **Navigate**: Performs top-down exploration of the module hierarchy
-3. **Identify**: Finds "interesting" code patterns (PhantomData, Drop implementations, consuming methods)
-4. **Analyze**: Uses LLM to analyze each pattern and identify invariants
-5. **Report**: Generates a detailed report with code evidence and explanations
+### Pipeline
+
+```
+Rust codebase
+  |
+  |-- [Multi-crate] Discover crates in subdirectories -> merge module graphs
+  |-- [Exhaustive]  Parse all .rs files with syn -> module graph -> BFS traversal
+  |-- [Semantic]    Run 12 semantic queries via octocode -> group by file -> merge regions
+  |
+  v
+Analysis Chunks (raw source preserving comments + structured AST data)
+  |
+  |- Priority scoring: PhantomData (+50), Drop impl (+40), consuming self (+30),
+  |  unsafe (+20), safety keywords (+10), --priority-modules match (+100)
+  |- Large modules split by type-affinity clustering (struct + its impls + related functions)
+  |- Token estimation (4 chars/token); function bodies stripped if still over budget
+  |- Sibling summaries give LLM awareness of other parts when module is split
+  |
+  v
+LLM Invariant Detection (one prompt per chunk, temperature 0.3)
+  |
+  |- Retry client: exponential backoff for 429/5xx/timeouts (up to --max-retries)
+  |- Token tracking: accumulates usage across all calls
+  |- System prompt with 8 ranked signal categories + 2 worked examples
+  |- Requests per-state output (one JSON entry per distinct state per entity)
+  |- JSON response parsing with text-based fallback
+  |
+  v
+Incremental Output
+  |- progress.jsonl  (one entry per chunk: completed/failed, tokens, timestamp)
+  |- invariants.jsonl (one Invariant per line, written immediately on discovery)
+  |
+  v
+Report (Markdown or JSON, grouped by invariant type, with skipped-files section)
+  -> runs/<model>_<YYYYMMDD>_<HHMMSS>/report.{md,json}
+```
+
+### What the LLM Looks For (ranked by signal reliability)
+
+1. **Runtime state checks** — `if !self.initialized`, `assert!(connected)`, `.is_null()`, `unwrap()` with precondition messages
+2. **Boolean/enum state fields** — `is_open: bool`, `state: AtomicU8`, `inner: Option<T>` tracking state at runtime
+3. **Comment-based protocols** — `// must call X before Y`, `// SAFETY: assumes ...`, `// Invariant:`
+4. **Error messages revealing invariants** — `Err("not initialized")`, `panic!("connection closed")`
+5. **Self-consuming methods** — `fn close(self)` that destroy state (transitions that should produce a new type)
+6. **Method availability patterns** — methods checking state before acting (`read()` checks `is_open`)
+7. **Option/UnsafeCell patterns** — `inner: UnsafeCell<Option<T>>`, "written at most once" invariants
+8. **Atomic state machines** — `state: AtomicU8` with named constants (`INCOMPLETE=0, RUNNING=1, COMPLETE=2`)
+
+### Suggested Patterns
+
+For each invariant, the tool recommends one of:
+
+| Pattern | When to use |
+|---------|-------------|
+| **Typestate** | Distinct states with different valid operations (`PhantomData<State>`) |
+| **Builder** | Complex initialization sequences with required steps |
+| **RAII** | Resources that must be released (Drop-based cleanup) |
+| **Newtype** | Validity invariants on values (`NonEmptyVec`, `ValidatedEmail`) |
+| **Session type** | Multi-step protocol enforcement via type-level state machines |
+| **Capability** | Authorization via token/capability passing |
 
 ## Architecture
 
 ```
 src/
-  main.rs                    # Entry point
+  main.rs                    # Entry point (tokio async)
+  lib.rs                     # Module exports
+
   cli/
-    mod.rs                   # CLI parsing, subcommand dispatch
-    config.rs                # TOML config loading
+    mod.rs                   # CLI parsing (clap), subcommand dispatch
+    config.rs                # TOML config, SearchMode, ExecutionConfig, InvariantType
+
   parser/
-    ast.rs                   # Rust AST extraction (syn)
-    module_graph.rs          # Crate module hierarchy
+    ast.rs                   # syn-based AST extraction: structs, enums, functions (with bodies),
+                             #   traits, impl blocks, PhantomData detection, attributes, unsafe flag
+    module_graph.rs          # Crate module hierarchy via walkdir + mod declaration parsing.
+                             #   Supports single crate (from_crate_root) and multi-crate workspace
+                             #   (from_workspace) with crate-prefixed module names. Tracks parse failures.
+
   navigation/
-    explorer.rs              # Top-down module traversal
-    context.rs               # Identifies interesting code items
+    explorer.rs              # BFS module traversal, reads raw source per module
+    context.rs               # AnalysisChunk + ItemCluster: module chunking, type-affinity
+                             #   clustering, token estimation, body stripping, sibling summaries
+    priority.rs              # Chunk priority scoring for --priority-modules and heuristic signals
+
+  search/
+    octocode.rs              # Async MCP client (JSON-RPC 2.0 over subprocess stdin/stdout)
+    queries.rs               # 12 predefined semantic queries targeting invariant signals
+    mod.rs                   # Search orchestrator: run queries, deduplicate, merge regions, build chunks
+
   detection/
-    state_machine.rs         # Typestate pattern detector
-    linear_types.rs          # Ordering invariant detector
-    ownership.rs             # Lifetime pattern detector
-    evidence.rs              # Code snippet extraction
+    invariant_inference.rs   # System prompt (8 signal categories, 2 worked examples),
+                             #   LLM request, JSON/text response parsing. Uses AtomicUsize for
+                             #   thread-safe ID generation.
+    evidence.rs              # Formats chunks for LLM: prefers raw source, falls back to AST reconstruction
+
   agent/
-    mod.rs                   # Main analysis orchestrator
+    mod.rs                   # Top-level orchestrator: retry client -> token tracker -> semaphore-based
+                             #   parallel execution -> progress tracking -> graceful shutdown -> report
+    progress.rs              # JSONL-based progress and invariant checkpointing. Resume support
+                             #   (completed chunks skipped, failed chunks retried).
+
   llm/
-    types.rs                 # LlmClient trait
-    openai.rs                # OpenAI implementation
+    types.rs                 # LlmClient trait, LlmRequest, LlmResponse (with cached/reasoning tokens)
+    openai.rs                # OpenAI implementation (async-openai)
+    anthropic.rs             # Anthropic implementation (reqwest)
+    retry.rs                 # RetryClient: exponential backoff with jitter for rate limits and
+                             #   transient errors. Respects Retry-After. Adaptive pressure from
+                             #   consecutive rate-limit hits across concurrent tasks.
+    tracking.rs              # TokenTrackingClient: transparent token accumulation via shared AtomicU64
+
   report/
-    markdown.rs              # Markdown output
-    json.rs                  # JSON output
+    mod.rs                   # Report, Summary, Invariant, Evidence, InvariantType, Confidence,
+                             #   parse_failures list
+    markdown.rs              # Markdown report generation (grouped by invariant type, skipped files section)
+    json.rs                  # JSON report generation (serde)
+
+runs/                        # Timestamped output directories (never overwritten)
+Dockerfile                   # Multi-stage build for stdlib analysis
+run_stdlib_test.sh           # One-command script to build and run on the Rust stdlib
 ```
 
 ### Feature Flags
@@ -161,27 +421,31 @@ src/
 |---------|---------|-------------|
 | `translation` | on | Enables `translate` subcommand via `llm_translation` crate |
 
-The `llm_translation` dependency is declared as:
 ```toml
+# In Cargo.toml
 llm_translation = { path = "../llm_translation", optional = true }
 ```
 
 ## Development
 
 ```bash
-# Run all tests
-cargo test
+# Run all tests (75 tests + 1 integration)
+cargo test --no-default-features
 
 # Run tests for a specific module
 cargo test parser
 cargo test navigation
 cargo test detection
+cargo test -- retry
+cargo test -- progress
+cargo test -- tracking
+cargo test -- priority
 
-# Build without translation
+# Build without translation feature
 cargo build --no-default-features
 
 # Check code
-cargo check
+cargo check --no-default-features
 ```
 
 For detailed development documentation, see [CLAUDE.md](CLAUDE.md).
