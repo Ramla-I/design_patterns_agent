@@ -261,7 +261,11 @@ fn extract_function(item: &ItemFn, path: &Path, is_method: bool) -> Option<Funct
         if inner.is_empty() {
             None
         } else if inner.len() > 1000 {
-            Some(format!("{}...", &inner[..1000]))
+            let mut end = 1000;
+            while !inner.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(format!("{}...", &inner[..end]))
         } else {
             Some(inner.to_string())
         }
