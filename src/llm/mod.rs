@@ -7,7 +7,7 @@ mod types;
 pub use anthropic::AnthropicClient;
 pub use openai::OpenAIClient;
 pub use retry::RetryClient;
-pub use tracking::TokenTrackingClient;
+pub use tracking::{TokenStats, TokenTrackingClient};
 pub use types::{LlmClient, LlmRequest};
 
 use anyhow::Result;

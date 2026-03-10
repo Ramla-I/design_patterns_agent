@@ -11,7 +11,7 @@ use crate::cli::config::SearchMode;
 use crate::cli::Config;
 use crate::detection::InvariantDetector;
 use crate::llm;
-use crate::llm::{RetryClient, TokenTrackingClient};
+use crate::llm::{RetryClient, TokenStats, TokenTrackingClient};
 use crate::navigation::priority::prioritize_chunks;
 use crate::navigation::{AnalysisChunk, Navigator};
 use crate::report::Report;
@@ -46,10 +46,10 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     }
 
     // Wrap with token tracking
-    let total_tokens = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let detector_stats = Arc::new(TokenStats::new());
     let llm_client: Arc<dyn llm::LlmClient> = Arc::new(TokenTrackingClient::new(
         retry_client,
-        total_tokens.clone(),
+        detector_stats.clone(),
     ));
 
     // Build analysis chunks based on search mode
@@ -86,9 +86,6 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
         chunks.len(),
         config.execution.token_budget as u64,
     )?);
-
-    // Share the total_tokens counter with the tracker
-    // (The tracker has its own counter but we connect them via record_result)
 
     // Resume from checkpoint if requested
     if let Some(ref resume_path) = config.execution.resume_path {
@@ -225,6 +222,7 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     }
 
     // Optional validation pass (uses a cheap model by default)
+    let validator_stats = Arc::new(TokenStats::new());
     let collected_invariants = if config.execution.validate {
         // Build a separate client for validation — defaults to a cheap model
         let validation_model = config.execution.validation_model.clone()
@@ -249,6 +247,10 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
             validation_client,
             config.execution.max_retries,
             config.execution.retry_base_delay,
+        ));
+        let validation_client: Arc<dyn llm::LlmClient> = Arc::new(TokenTrackingClient::new(
+            validation_client,
+            validator_stats.clone(),
         ));
 
         let mut validated = Vec::new();
@@ -308,9 +310,11 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     println!("  - Precondition: {}", report.summary.precondition_count);
     println!("  - Protocol: {}", report.summary.protocol_count);
 
-    let total = total_tokens.load(Ordering::Relaxed);
-    if total > 0 {
-        println!("  Total tokens used: {}", total);
+    let detector_total = detector_stats.print_summary("Detector");
+    let validator_total = validator_stats.print_summary("Validator");
+    let grand_total = detector_total + validator_total;
+    if grand_total > 0 {
+        println!("  Grand total tokens: {}", grand_total);
     }
     if !report.parse_failures.is_empty() {
         println!("  Files skipped (parse errors): {}", report.parse_failures.len());
