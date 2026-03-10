@@ -20,7 +20,8 @@ struct AnthropicMessage {
 struct AnthropicRequestBody {
     model: String,
     max_tokens: u32,
-    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     system: String,
     messages: Vec<AnthropicMessage>,
 }

@@ -23,6 +23,15 @@ impl OpenAIClient {
 
         Self { client, model }
     }
+
+    /// Returns true if the model is known to reject custom temperature values.
+    fn model_rejects_temperature(&self) -> bool {
+        let m = self.model.as_str();
+        m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.starts_with("gpt-5")
+    }
 }
 
 #[async_trait]
@@ -41,11 +50,16 @@ impl LlmClient for OpenAIClient {
             ),
         ];
 
-        let chat_request = CreateChatCompletionRequestArgs::default()
-            .model(&self.model)
-            .messages(messages)
-            .temperature(request.temperature)
-            .build()?;
+        let mut builder = CreateChatCompletionRequestArgs::default();
+        builder.model(&self.model).messages(messages);
+        // Some models (o1, o3, gpt-5, etc.) don't support custom temperature.
+        // Only set it when the model is known to accept it.
+        if let Some(temp) = request.temperature {
+            if !self.model_rejects_temperature() {
+                builder.temperature(temp);
+            }
+        }
+        let chat_request = builder.build()?;
 
         let response = self.client.chat().create(chat_request).await?;
 

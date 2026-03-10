@@ -58,11 +58,49 @@ ENV_FLAGS=()
 [ -n "${ANTHROPIC_API_KEY:-}" ] && ENV_FLAGS+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
 [ -n "${OPENAI_API_KEY:-}" ]    && ENV_FLAGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
+# When extra arguments are provided, they replace Docker's CMD entirely.
+# Merge the defaults with any user overrides so --multi-crate etc. are always present.
+DEFAULT_ARGS=(
+    "--multi-crate"
+    "--concurrency" "5"
+    "--priority-modules" "sync,io,fs,net,cell,collections,thread,process"
+    "--provider" "anthropic"
+    "--model" "claude-sonnet-4-20250514"
+    "--token-budget" "1000000"
+    "--validate"
+    "--validation-model" "gpt-4o-mini"
+)
+
+# User args override defaults: build a set of flags the user explicitly provided,
+# then only include defaults whose flag was NOT overridden.
+MERGED_ARGS=()
+user_flags=" $* "
+i=0
+while [ $i -lt ${#DEFAULT_ARGS[@]} ]; do
+    flag="${DEFAULT_ARGS[$i]}"
+    if [[ "$flag" == --* ]]; then
+        if [[ "$user_flags" == *" $flag "* ]]; then
+            # User overrides this flag — skip the default (and its value if any)
+            i=$((i + 1))
+            # Skip the value too if the next element is not a flag
+            if [ $i -lt ${#DEFAULT_ARGS[@]} ] && [[ "${DEFAULT_ARGS[$i]}" != --* ]]; then
+                i=$((i + 1))
+            fi
+            continue
+        fi
+    fi
+    MERGED_ARGS+=("${DEFAULT_ARGS[$i]}")
+    i=$((i + 1))
+done
+
+# Append user args after defaults (user args take precedence for flags like --provider)
+MERGED_ARGS+=("$@")
+
 docker run --rm \
     "${ENV_FLAGS[@]}" \
     -v "${RUNS_DIR}:/workspace/runs" \
     "${IMAGE_NAME}" \
-    "$@"
+    "${MERGED_ARGS[@]}"
 
 echo ""
 echo "==> Done. Results saved to ${RUNS_DIR}"
