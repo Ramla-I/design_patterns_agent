@@ -316,6 +316,19 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     if grand_total > 0 {
         println!("  Grand total tokens: {}", grand_total);
     }
+
+    // Save token usage to run directory
+    if grand_total > 0 {
+        let usage = serde_json::json!({
+            "detector": detector_stats.snapshot(),
+            "validator": validator_stats.snapshot(),
+            "grand_total_tokens": grand_total,
+        });
+        let usage_path = run_dir.join("token_usage.json");
+        if let Err(e) = std::fs::write(&usage_path, serde_json::to_string_pretty(&usage).unwrap_or_default()) {
+            eprintln!("Warning: failed to write token usage: {}", e);
+        }
+    }
     if !report.parse_failures.is_empty() {
         println!("  Files skipped (parse errors): {}", report.parse_failures.len());
     }

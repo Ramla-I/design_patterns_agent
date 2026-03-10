@@ -3,8 +3,19 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Serialize;
 
 use super::types::{LlmClient, LlmRequest, LlmResponse};
+
+/// Serializable snapshot of token usage counters.
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenStatsSnapshot {
+    pub input_tokens: u64,
+    pub cached_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub total_tokens: u64,
+}
 
 /// Granular token usage counters, safe for concurrent access.
 #[derive(Debug)]
@@ -33,6 +44,17 @@ impl TokenStats {
         self.output_tokens.fetch_add(response.completion_tokens as u64, Ordering::Relaxed);
         self.reasoning_tokens.fetch_add(response.reasoning_tokens as u64, Ordering::Relaxed);
         self.total_tokens.fetch_add(response.tokens_used as u64, Ordering::Relaxed);
+    }
+
+    /// Return a serializable snapshot of the current counters.
+    pub fn snapshot(&self) -> TokenStatsSnapshot {
+        TokenStatsSnapshot {
+            input_tokens: self.input_tokens.load(Ordering::Relaxed),
+            cached_tokens: self.cached_tokens.load(Ordering::Relaxed),
+            output_tokens: self.output_tokens.load(Ordering::Relaxed),
+            reasoning_tokens: self.reasoning_tokens.load(Ordering::Relaxed),
+            total_tokens: self.total_tokens.load(Ordering::Relaxed),
+        }
     }
 
     /// Print a labeled summary of token usage. Returns total tokens.
