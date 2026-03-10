@@ -2,6 +2,7 @@ use std::path::Path;
 use syn::{File, Item, ItemEnum, ItemFn, ItemImpl, ItemStruct, ItemTrait, ItemType};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum CodeItem {
     Struct(StructDef),
     Enum(EnumDef),
@@ -12,6 +13,7 @@ pub enum CodeItem {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StructDef {
     pub name: String,
     pub generics: String,
@@ -29,6 +31,7 @@ pub struct Field {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EnumDef {
     pub name: String,
     pub generics: String,
@@ -39,12 +42,14 @@ pub struct EnumDef {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Variant {
     pub name: String,
     pub fields: Vec<Field>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FunctionDef {
     pub name: String,
     pub signature: String,
@@ -66,6 +71,7 @@ pub enum SelfParam {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TraitDef {
     pub name: String,
     pub methods: Vec<String>,
@@ -83,6 +89,7 @@ pub struct ImplBlock {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TypeAlias {
     pub name: String,
     pub target: String,
@@ -99,6 +106,7 @@ pub enum Visibility {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SourceLocation {
     pub file_path: String,
     pub line: usize,
@@ -109,6 +117,13 @@ pub fn extract_items(file: &File, path: &Path) -> Vec<CodeItem> {
     let mut items = Vec::new();
     extract_items_from_slice(&file.items, path, &mut items);
     items
+}
+
+/// Extract code items from a list of syn::Items (for item-level fallback parsing)
+pub fn extract_items_from_list(items: &[Item], path: &Path) -> Vec<CodeItem> {
+    let mut result = Vec::new();
+    extract_items_from_slice(items, path, &mut result);
+    result
 }
 
 /// Recursively extract items from a slice of syn::Item, handling inline modules
@@ -189,7 +204,7 @@ fn extract_struct(item: &ItemStruct, path: &Path) -> Option<StructDef> {
         has_phantom_data,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1, // Line number tracking would require additional span processing
+            line: item.ident.span().start().line,
         },
     })
 }
@@ -234,7 +249,7 @@ fn extract_enum(item: &ItemEnum, path: &Path) -> Option<EnumDef> {
         doc_comment,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1, // Line number tracking would require additional span processing
+            line: item.ident.span().start().line,
         },
     })
 }
@@ -307,7 +322,7 @@ fn extract_function(item: &ItemFn, path: &Path, is_method: bool) -> Option<Funct
         is_unsafe,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1,
+            line: item.sig.ident.span().start().line,
         },
     })
 }
@@ -336,7 +351,7 @@ fn extract_trait(item: &ItemTrait, path: &Path) -> Option<TraitDef> {
         doc_comment,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1, // Line number tracking would require additional span processing
+            line: item.ident.span().start().line,
         },
     })
 }
@@ -386,7 +401,7 @@ fn extract_impl(item: &ItemImpl, path: &Path) -> Option<ImplBlock> {
         methods,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1,
+            line: item.impl_token.span.start().line,
         },
     })
 }
@@ -403,7 +418,7 @@ fn extract_type_alias(item: &ItemType, path: &Path) -> Option<TypeAlias> {
         visibility,
         source_location: SourceLocation {
             file_path: path.to_string_lossy().to_string(),
-            line: 1, // Line number tracking would require additional span processing
+            line: item.ident.span().start().line,
         },
     })
 }
@@ -562,6 +577,30 @@ pub struct Documented {
                 assert!(doc.contains("with multiple lines"));
             }
             _ => panic!("Expected struct"),
+        }
+    }
+
+    #[test]
+    fn test_line_numbers_from_spans() {
+        let code = "// line 1\n// line 2\npub struct Foo {\n    x: i32,\n}\n\npub enum Bar {\n    A,\n    B,\n}\n";
+        let file = syn::parse_file(code).unwrap();
+        let items = extract_items(&file, Path::new("test.rs"));
+
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            CodeItem::Struct(s) => {
+                assert_eq!(s.name, "Foo");
+                // Struct is on line 3 (after two comment lines)
+                assert!(s.source_location.line >= 3, "Expected line >= 3, got {}", s.source_location.line);
+            }
+            _ => panic!("Expected struct"),
+        }
+        match &items[1] {
+            CodeItem::Enum(e) => {
+                assert_eq!(e.name, "Bar");
+                assert!(e.source_location.line >= 7, "Expected line >= 7, got {}", e.source_location.line);
+            }
+            _ => panic!("Expected enum"),
         }
     }
 }

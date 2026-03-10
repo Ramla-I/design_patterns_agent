@@ -28,6 +28,7 @@ mod tests {
             },
             suggested_pattern: "typestate".to_string(),
             confidence: Confidence::Medium,
+            entity: String::new(),
         }
     }
 

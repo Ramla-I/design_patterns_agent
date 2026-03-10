@@ -11,6 +11,7 @@
 # Examples:
 #   ./run_stdlib_test.sh --concurrency 10 --token-budget 2000000
 #   ./run_stdlib_test.sh --resume /workspace/runs/<prev_run>/progress.jsonl
+#   ./run_stdlib_test.sh --validate   # second-pass review via gpt-4o-mini (low cost, reduces hallucinations)
 #
 set -euo pipefail
 
@@ -29,6 +30,12 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
     echo "  export ANTHROPIC_API_KEY=sk-ant-..." >&2
     echo "  export OPENAI_API_KEY=sk-..." >&2
     exit 1
+fi
+
+# Validation uses gpt-4o-mini by default, so OPENAI_API_KEY is needed alongside ANTHROPIC_API_KEY
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    echo "Warning: OPENAI_API_KEY not set. Validation pass (--validate) uses gpt-4o-mini by default." >&2
+    echo "  Set OPENAI_API_KEY or pass --validation-model to use an Anthropic model instead." >&2
 fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────

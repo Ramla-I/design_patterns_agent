@@ -98,6 +98,7 @@ mod tests {
             },
             suggested_pattern: "typestate".to_string(),
             confidence: Confidence::High,
+            entity: String::new(),
         }
     }
 

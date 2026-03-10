@@ -15,10 +15,10 @@ pub fn prioritize_chunks(mut chunks: Vec<AnalysisChunk>, priority_prefixes: &[St
 fn score_chunk(chunk: &AnalysisChunk, priority_prefixes: &[String]) -> i32 {
     let mut score: i32 = 0;
 
-    // +100: module path matches a priority prefix
+    // +1000: module path matches a priority prefix
     for prefix in priority_prefixes {
         if chunk.module_path.contains(prefix) {
-            score += 100;
+            score += 1000;
             break;
         }
     }
@@ -118,6 +118,13 @@ mod tests {
         let c2 = make_chunk("mod_b");
         let chunks = prioritize_chunks(vec![c2, c1], &[]);
         assert_eq!(chunks[0].module_path, "mod_a");
+    }
+
+    #[test]
+    fn test_priority_prefix_1000_boost() {
+        let c = make_chunk("std::sync::mutex");
+        let score = score_chunk(&c, &["sync".to_string()]);
+        assert!(score >= 1000, "Priority prefix should give at least 1000 points, got {}", score);
     }
 
     #[test]

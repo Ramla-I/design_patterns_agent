@@ -35,6 +35,8 @@ pub struct Invariant {
     pub evidence: Evidence,
     pub suggested_pattern: String,
     pub confidence: Confidence,
+    #[serde(default)]
+    pub entity: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -108,6 +110,37 @@ impl Report {
     }
 }
 
+pub fn deduplicate(invariants: Vec<Invariant>) -> Vec<Invariant> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<String, Vec<Invariant>> = HashMap::new();
+    for inv in invariants {
+        let key = normalize_dedup_key(&inv);
+        groups.entry(key).or_default().push(inv);
+    }
+    groups.into_values().map(|mut group| {
+        // Sort: highest confidence first, then longest evidence
+        group.sort_by(|a, b| {
+            confidence_rank(&b.confidence).cmp(&confidence_rank(&a.confidence))
+                .then_with(|| b.evidence.code_snippet.len().cmp(&a.evidence.code_snippet.len()))
+        });
+        group.remove(0) // keep best
+    }).collect()
+}
+
+fn normalize_dedup_key(inv: &Invariant) -> String {
+    let entity = inv.entity.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = inv.title.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{}|{}|{:?}", entity, title, inv.invariant_type)
+}
+
+fn confidence_rank(c: &Confidence) -> u8 {
+    match c {
+        Confidence::High => 3,
+        Confidence::Medium => 2,
+        Confidence::Low => 1,
+    }
+}
+
 impl Default for Report {
     fn default() -> Self {
         Self::new()
@@ -135,6 +168,7 @@ mod tests {
             },
             suggested_pattern: "typestate".to_string(),
             confidence: Confidence::Medium,
+            entity: String::new(),
         }
     }
 
@@ -164,5 +198,61 @@ mod tests {
         assert_eq!(report.summary.total_invariants, 2);
         assert_eq!(report.summary.temporal_ordering_count, 1);
         assert_eq!(report.summary.resource_lifecycle_count, 1);
+    }
+
+    #[test]
+    fn test_dedup_same_entity_title() {
+        let mut inv1 = make_test_invariant(1, InvariantType::StateMachine);
+        inv1.entity = "Foo".to_string();
+        inv1.title = "Foo::Open state".to_string();
+        inv1.confidence = Confidence::Medium;
+
+        let mut inv2 = make_test_invariant(2, InvariantType::StateMachine);
+        inv2.entity = "Foo".to_string();
+        inv2.title = "Foo::Open state".to_string();
+        inv2.confidence = Confidence::High;
+
+        let result = deduplicate(vec![inv1, inv2]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].confidence, Confidence::High);
+    }
+
+    #[test]
+    fn test_dedup_different_entities() {
+        let mut inv1 = make_test_invariant(1, InvariantType::StateMachine);
+        inv1.entity = "Foo".to_string();
+        inv1.title = "Foo::Open state".to_string();
+
+        let mut inv2 = make_test_invariant(2, InvariantType::StateMachine);
+        inv2.entity = "Bar".to_string();
+        inv2.title = "Bar::Open state".to_string();
+
+        let result = deduplicate(vec![inv1, inv2]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_confidence_tiebreak() {
+        let mut inv1 = make_test_invariant(1, InvariantType::StateMachine);
+        inv1.entity = "Foo".to_string();
+        inv1.title = "Foo state".to_string();
+        inv1.confidence = Confidence::High;
+        inv1.evidence = Evidence {
+            code_snippet: "short".to_string(),
+            explanation: "exp".to_string(),
+        };
+
+        let mut inv2 = make_test_invariant(2, InvariantType::StateMachine);
+        inv2.entity = "Foo".to_string();
+        inv2.title = "Foo state".to_string();
+        inv2.confidence = Confidence::High;
+        inv2.evidence = Evidence {
+            code_snippet: "a much longer code snippet that has more evidence".to_string(),
+            explanation: "exp".to_string(),
+        };
+
+        let result = deduplicate(vec![inv1, inv2]);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].evidence.code_snippet.contains("much longer"));
     }
 }

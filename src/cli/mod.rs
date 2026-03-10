@@ -84,6 +84,14 @@ pub struct Cli {
     /// Base delay in seconds for exponential backoff between retries
     #[arg(long, default_value = "2", global = true)]
     pub retry_base_delay: u64,
+
+    /// Run a validation pass on discovered invariants (uses a cheap model by default; override with --validation-model)
+    #[arg(long, global = true)]
+    pub validate: bool,
+
+    /// Model to use for validation pass (default: gpt-4o-mini for openai, claude-haiku-4-5-20251001 for anthropic)
+    #[arg(long, global = true)]
+    pub validation_model: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -134,6 +142,7 @@ pub enum OutputFormat {
     Json,
 }
 
+#[allow(dead_code)]
 /// Legacy Args struct for backward compatibility
 #[derive(Debug)]
 pub struct Args {
@@ -155,6 +164,8 @@ pub struct Args {
     pub multi_crate: bool,
     pub max_retries: u32,
     pub retry_base_delay: u64,
+    pub validate: bool,
+    pub validation_model: Option<String>,
 }
 
 impl Args {
@@ -178,6 +189,8 @@ impl Args {
             multi_crate: cli.multi_crate,
             max_retries: cli.max_retries,
             retry_base_delay: cli.retry_base_delay,
+            validate: cli.validate,
+            validation_model: cli.validation_model.clone(),
         }
     }
 

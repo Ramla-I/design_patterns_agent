@@ -57,6 +57,7 @@ impl<'a> Explorer<'a> {
         results
     }
 
+    #[cfg(test)]
     pub fn visited_count(&self) -> usize {
         self.visited_modules.len()
     }

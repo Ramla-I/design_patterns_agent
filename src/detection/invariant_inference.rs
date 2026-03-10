@@ -228,7 +228,13 @@ Classify each invariant as:
 - **Only report invariants backed by concrete evidence in the code.** Do NOT invent methods, fields, or behaviors not present in the snippet.
 - **You MAY infer** states from: field types (Option<T>, enums, booleans, atomics), method signatures (self vs &self vs &mut self), error messages, comments, and API structure.
 - **You MAY NOT invent**: methods not shown in the snippet, fields not present, speculative behaviors without code support.
-- **Quality over quantity** — one well-evidenced invariant is better than five speculative ones."#;
+- **Quality over quantity** — one well-evidenced invariant is better than five speculative ones.
+
+EXCLUSIONS — do NOT report:
+- Conditional compilation (cfg, cfg_if, cfg_select, cfg_attr, feature gates)
+- Enum variant type safety (e.g. "TokenTree variant matches its data" — this is enforced by the type system)
+- Documentation or API stability policies
+- Properties that are already compile-time guarantees"#;
 
 impl InvariantInferenceDetector {
     pub fn new() -> Self {
@@ -244,9 +250,8 @@ impl InvariantInferenceDetector {
         let code_content = EvidenceExtractor::format_chunk(chunk);
 
         let user_prompt = format!(
-            r#"Analyze the following Rust module for latent invariants — implicit states, ordering requirements, and protocols that could be enforced at compile time.
-
-Module: `{module_path}`
+            r#"Analyze the following Rust code from module `{module_path}`. Focus on the primary type/entity in this chunk.
+Find latent invariants — implicit states, ordering requirements, and protocols that could be enforced at compile time.
 File: `{file_path}`
 
 ```rust
@@ -265,13 +270,15 @@ For each entity (struct, enum, or function group) with implicit states, produce 
     "description": "what must be true in this state",
     "invariants": ["condition 1 that holds in this state", "condition 2"],
     "transitions": ["Open -> Closed via close()", "or empty if terminal state"],
-    "evidence": ["is_open boolean field", "if !self.is_open check on line N", "Err(\"closed\") error message"],
+    "evidence": ["line 5: is_open boolean field", "line 12: if !self.is_open check guards read()", "line 17: Err(\"closed\") error message names the invariant"],
     "suggested_pattern": "typestate | builder | raii | newtype | session_type | capability",
     "implementation_sketch": "brief description of how to apply the pattern",
     "confidence": "high | medium | low"
   }}
 ]
 ```
+
+Each `evidence` item SHOULD start with `line N:` referencing a specific line number in the code above. This helps verify the claim against the actual source.
 
 If no meaningful invariants are found, respond with an empty array: `[]`
 
@@ -318,6 +325,7 @@ Focus on invariants that are **implicit** — enforced by runtime checks, commen
 
         let invariants = parsed
             .into_iter()
+            .filter(|inv| !is_compile_time_noise(inv))
             .map(|inv| {
                 // Build rich explanation with state info
                 let mut explanation = String::new();
@@ -345,6 +353,16 @@ Focus on invariants that are **implicit** — enforced by runtime checks, commen
                 explanation.push_str(&format!("**Evidence:** {}\n\n", inv.evidence.join("; ")));
                 explanation.push_str(&format!("**Implementation:** {}", inv.implementation_sketch));
 
+                // Citation verification: adjust confidence based on evidence quality
+                let citation_rate = verify_citations(&inv.evidence, code_snippet);
+                let adjusted_confidence = if citation_rate < 0.5 {
+                    "low".to_string()
+                } else if citation_rate < 0.8 {
+                    downgrade_confidence(&inv.confidence)
+                } else {
+                    inv.confidence.clone()
+                };
+
                 let id = next_id.fetch_add(1, Ordering::Relaxed);
                 Invariant {
                     id,
@@ -361,7 +379,8 @@ Focus on invariants that are **implicit** — enforced by runtime checks, commen
                         explanation,
                     },
                     suggested_pattern: inv.suggested_pattern,
-                    confidence: parse_confidence(&inv.confidence),
+                    confidence: parse_confidence(&adjusted_confidence),
+                    entity: inv.entity.clone(),
                 }
             })
             .collect();
@@ -430,6 +449,7 @@ Focus on invariants that are **implicit** — enforced by runtime checks, commen
             },
             suggested_pattern: pattern,
             confidence: Confidence::Medium,
+            entity: String::new(),
         };
 
         Some(invariant)
@@ -461,6 +481,15 @@ struct LlmInvariant {
     suggested_pattern: String,
     implementation_sketch: String,
     confidence: String,
+}
+
+fn is_compile_time_noise(inv: &LlmInvariant) -> bool {
+    let text = format!("{} {} {}", inv.entity, inv.name, inv.description).to_lowercase();
+    let noise = ["cfg_select", "cfg_if", "cfg_attr", "feature gate",
+                  "conditional compilation", "variant correctness",
+                  "enum exhaustiveness", "documentation policy",
+                  "doc comment", "api stability", "compile-time"];
+    noise.iter().any(|p| text.contains(p))
 }
 
 // --- Parsing helpers ---
@@ -518,6 +547,42 @@ fn parse_confidence(confidence: &str) -> Confidence {
         "high" => Confidence::High,
         "low" => Confidence::Low,
         _ => Confidence::Medium,
+    }
+}
+
+fn verify_citations(evidence: &[String], snippet: &str) -> f64 {
+    let lines: Vec<&str> = snippet.lines().collect();
+    let mut verified = 0;
+    let mut total = 0;
+    for ev in evidence {
+        if let Some(rest) = ev.strip_prefix("line ") {
+            if let Some(colon_pos) = rest.find(':') {
+                if let Ok(line_num) = rest[..colon_pos].trim().parse::<usize>() {
+                    total += 1;
+                    let cited_text = rest[colon_pos + 1..].trim();
+                    if cited_text.is_empty() {
+                        continue;
+                    }
+                    // Check line_num (1-indexed) and ±2 neighbors
+                    let idx = line_num.saturating_sub(1); // convert to 0-indexed
+                    let start = idx.saturating_sub(2);
+                    let end = (idx + 3).min(lines.len());
+                    if (start..end).any(|i| lines[i].contains(cited_text)) {
+                        verified += 1;
+                    }
+                }
+            }
+        }
+    }
+    if total == 0 { return 0.5; } // no citations → neutral
+    verified as f64 / total as f64
+}
+
+fn downgrade_confidence(confidence: &str) -> String {
+    match confidence.to_lowercase().as_str() {
+        "high" => "medium".to_string(),
+        "medium" => "low".to_string(),
+        _ => "low".to_string(),
     }
 }
 
@@ -622,6 +687,77 @@ mod tests {
             classify_from_text("newtype", "state transitions"),
             InvariantType::StateMachine
         );
+    }
+
+    #[test]
+    fn test_compile_time_noise_filter() {
+        let noisy = LlmInvariant {
+            entity: "TokenTree".to_string(),
+            name: "Conditional compilation guard".to_string(),
+            state: String::new(),
+            kind: "precondition".to_string(),
+            description: "cfg_select macro ensures correct platform code".to_string(),
+            invariants: vec![],
+            transitions: vec![],
+            evidence: vec![],
+            suggested_pattern: String::new(),
+            implementation_sketch: String::new(),
+            confidence: "high".to_string(),
+        };
+        assert!(is_compile_time_noise(&noisy));
+
+        let good = LlmInvariant {
+            entity: "Connection".to_string(),
+            name: "Connection::Open state".to_string(),
+            state: "Open".to_string(),
+            kind: "state_machine".to_string(),
+            description: "Connection must be opened before reading".to_string(),
+            invariants: vec![],
+            transitions: vec![],
+            evidence: vec![],
+            suggested_pattern: "typestate".to_string(),
+            implementation_sketch: String::new(),
+            confidence: "high".to_string(),
+        };
+        assert!(!is_compile_time_noise(&good));
+    }
+
+    #[test]
+    fn test_citation_verified() {
+        let snippet = "fn foo() {\n    let x = 1;\n    if x > 0 {\n        bar();\n    }\n}";
+        let evidence = vec![
+            "line 2: let x = 1".to_string(),
+            "line 3: if x > 0".to_string(),
+        ];
+        let rate = verify_citations(&evidence, snippet);
+        assert!(rate > 0.9);
+    }
+
+    #[test]
+    fn test_citation_wrong_line() {
+        let snippet = "fn foo() {\n    let x = 1;\n}";
+        let evidence = vec![
+            "line 50: something that does not exist".to_string(),
+        ];
+        let rate = verify_citations(&evidence, snippet);
+        assert!(rate < 0.1);
+    }
+
+    #[test]
+    fn test_citation_no_prefix() {
+        let snippet = "fn foo() {}";
+        let evidence = vec![
+            "the foo function does something".to_string(),
+        ];
+        let rate = verify_citations(&evidence, snippet);
+        assert!((rate - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_downgrade_confidence() {
+        assert_eq!(downgrade_confidence("high"), "medium");
+        assert_eq!(downgrade_confidence("medium"), "low");
+        assert_eq!(downgrade_confidence("low"), "low");
     }
 
     #[test]

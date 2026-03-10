@@ -1,8 +1,9 @@
 mod evidence;
 mod invariant_inference;
+pub mod validation;
 
-pub use evidence::EvidenceExtractor;
 pub use invariant_inference::InvariantInferenceDetector;
+pub use validation::InvariantValidator;
 
 use std::sync::atomic::AtomicUsize;
 

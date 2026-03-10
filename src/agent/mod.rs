@@ -110,6 +110,15 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
         });
     }
 
+    // Partition priority chunks (these bypass budget enforcement)
+    let priority_prefixes: Vec<String> = config.execution.priority_modules.clone();
+    let priority_total = chunks.iter().filter(|c| priority_prefixes.iter().any(|p| c.module_path.contains(p))).count();
+    let other_total = chunks.len() - priority_total;
+
+    // Counters for coverage stats
+    let priority_analyzed = Arc::new(AtomicUsize::new(0));
+    let other_analyzed = Arc::new(AtomicUsize::new(0));
+
     // Create detector and ID counter
     let detector = Arc::new(InvariantDetector::new());
     let next_id = Arc::new(AtomicUsize::new(1));
@@ -136,6 +145,9 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
         let next_id = next_id.clone();
         let tracker = tracker.clone();
         let shutdown = shutdown.clone();
+        let priority_prefixes = priority_prefixes.clone();
+        let priority_analyzed = priority_analyzed.clone();
+        let other_analyzed = other_analyzed.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -144,7 +156,8 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
             if shutdown.load(Ordering::Relaxed) {
                 return;
             }
-            if tracker.budget_exceeded() {
+            let is_priority = priority_prefixes.iter().any(|p| chunk.module_path.contains(p));
+            if !is_priority && tracker.budget_exceeded() {
                 eprintln!("  Token budget exceeded, skipping: {}", chunk.module_path);
                 return;
             }
@@ -157,6 +170,11 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
                     // Record each invariant to JSONL
                     for inv in &invariants {
                         tracker.record_invariant(inv);
+                    }
+                    if is_priority {
+                        priority_analyzed.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        other_analyzed.fetch_add(1, Ordering::Relaxed);
                     }
                     tracker.record_result(&module_path, "completed", count, 0, None);
                     tracker.print_status();
@@ -188,8 +206,75 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
         .map(|pf| (pf.file_path, pf.error))
         .collect();
 
+    let mut collected_invariants = Vec::new();
     while let Some(invariant) = rx.recv().await {
-        report.add_invariant(invariant);
+        collected_invariants.push(invariant);
+    }
+
+    // Deduplicate invariants
+    let before_dedup = collected_invariants.len();
+    let collected_invariants = crate::report::deduplicate(collected_invariants);
+    let after_dedup = collected_invariants.len();
+    if before_dedup > after_dedup {
+        eprintln!(
+            "Deduplicated: {} → {} invariants ({} duplicates removed)",
+            before_dedup,
+            after_dedup,
+            before_dedup - after_dedup
+        );
+    }
+
+    // Optional validation pass (uses a cheap model by default)
+    let collected_invariants = if config.execution.validate {
+        // Build a separate client for validation — defaults to a cheap model
+        let validation_model = config.execution.validation_model.clone()
+            .unwrap_or_else(|| default_validation_model(&config.llm.provider));
+        eprintln!(
+            "Running validation pass on {} invariants (model: {})...",
+            collected_invariants.len(),
+            validation_model,
+        );
+        let validation_provider = infer_provider(&validation_model, &config.llm.provider);
+        let validation_api_key = match validation_provider {
+            "openai" => std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| config.llm.api_key.clone()),
+            "anthropic" => std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| config.llm.api_key.clone()),
+            _ => config.llm.api_key.clone(),
+        };
+        let validation_client: Arc<dyn llm::LlmClient> = Arc::from(llm::create_client(
+            validation_provider,
+            validation_api_key,
+            validation_model,
+        )?);
+        let validation_client: Arc<dyn llm::LlmClient> = Arc::new(RetryClient::new(
+            validation_client,
+            config.execution.max_retries,
+            config.execution.retry_base_delay,
+        ));
+
+        let mut validated = Vec::new();
+        for inv in collected_invariants {
+            match crate::detection::InvariantValidator::validate(&inv, validation_client.as_ref()).await {
+                Ok(result) if result.valid => {
+                    let mut inv = inv;
+                    inv.confidence = result.adjusted_confidence;
+                    validated.push(inv);
+                }
+                Ok(result) => {
+                    eprintln!("  Filtered: {} ({})", inv.title, result.reason);
+                }
+                Err(_) => {
+                    validated.push(inv); // keep on error
+                }
+            }
+        }
+        eprintln!("Validation: {} invariants passed", validated.len());
+        validated
+    } else {
+        collected_invariants
+    };
+
+    for inv in collected_invariants {
+        report.add_invariant(inv);
     }
 
     // Wait for all tasks to complete
@@ -229,6 +314,19 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     }
     if !report.parse_failures.is_empty() {
         println!("  Files skipped (parse errors): {}", report.parse_failures.len());
+    }
+
+    if !config.execution.priority_modules.is_empty() {
+        println!(
+            "  Priority modules: {}/{}",
+            priority_analyzed.load(Ordering::Relaxed),
+            priority_total,
+        );
+        println!(
+            "  Other modules: {}/{}",
+            other_analyzed.load(Ordering::Relaxed),
+            other_total,
+        );
     }
 
     println!("  Progress saved to: {}", run_dir.display());
@@ -308,6 +406,25 @@ async fn build_semantic_chunks(
     }
 
     Ok((chunks, files.len()))
+}
+
+/// Return the default cheap model for validation, given the LLM provider.
+fn default_validation_model(provider: &str) -> String {
+    match provider {
+        "anthropic" => "claude-haiku-4-5-20251001".to_string(),
+        _ => "gpt-4o-mini".to_string(),
+    }
+}
+
+/// Infer the LLM provider from the model name, falling back to the given default.
+fn infer_provider<'a>(model: &str, default: &'a str) -> &'a str {
+    if model.starts_with("gpt-") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") {
+        return "openai";
+    }
+    if model.starts_with("claude-") {
+        return "anthropic";
+    }
+    default
 }
 
 #[cfg(test)]

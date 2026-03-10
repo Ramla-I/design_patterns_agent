@@ -8,7 +8,7 @@ pub use anthropic::AnthropicClient;
 pub use openai::OpenAIClient;
 pub use retry::RetryClient;
 pub use tracking::TokenTrackingClient;
-pub use types::{LlmClient, LlmRequest, LlmResponse};
+pub use types::{LlmClient, LlmRequest};
 
 use anyhow::Result;
 

@@ -4,175 +4,151 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Design Patterns Agent** is a Rust CLI tool that analyzes Rust codebases to discover invariants. It uses LLM-powered analysis to identify:
-- State machine invariants (typestate patterns)
-- Linear type invariants (ordering requirements, capabilities)
-- Ownership and lifetime patterns
+**Design Patterns Agent** is a Rust CLI tool that analyzes Rust codebases to discover **latent invariants** — implicit protocols, temporal ordering requirements, and state dependencies that exist in code but aren't yet enforced by the type system. It uses LLM-powered analysis to identify these invariants and suggest compile-time enforcement patterns (typestate, RAII, builder, newtype, session type, capability passing).
 
 ## Development Commands
 
 ### Build and Test
 ```bash
-# Build the project
+# Build without translation feature (invariant analysis only)
+cargo build --no-default-features
+
+# Build with all features
 cargo build
 
-# Run all tests
-cargo test
+# Run all tests (95 unit + 1 integration)
+cargo test --no-default-features
 
 # Run tests for a specific module
 cargo test parser
 cargo test navigation
 cargo test detection
+cargo test report
+cargo test -- retry
+cargo test -- progress
+cargo test -- priority
 
-# Check code without building
-cargo check
-
-# Run with optimizations
-cargo build --release
+# Check code
+cargo check --no-default-features
 ```
 
 ### Running the Tool
 ```bash
 # Basic usage
-cargo run -- /path/to/rust/codebase
+cargo run -- analyze /path/to/rust/codebase
 
-# With output file
-cargo run -- /path/to/rust/codebase --output report.md
+# Multi-crate workspace (e.g., rust stdlib)
+cargo run -- analyze /path/to/workspace --multi-crate --concurrency 5
 
-# JSON output format
-cargo run -- /path/to/rust/codebase --format json --output report.json
+# With token budget and priority modules
+cargo run -- analyze /path/to/project --token-budget 500000 --priority-modules sync,io,fs
 
-# With custom configuration
-cargo run -- /path/to/rust/codebase --config config.toml
+# Validation pass (second LLM call to verify invariants, doubles cost)
+cargo run -- analyze /path/to/project --validate
 
-# Specify API key and model
-cargo run -- /path/to/rust/codebase --api-key sk-... --model gpt-4
+# Use Anthropic
+cargo run -- analyze /path/to/project --provider anthropic --model claude-sonnet-4-20250514
+
+# Resume a previous run
+cargo run -- analyze /path/to/project --resume runs/<prev_run>/progress.jsonl
 ```
 
 ### Environment Variables
 ```bash
-# Set OpenAI API key
 export OPENAI_API_KEY=sk-...
+# or
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ## Architecture
 
-The codebase follows a modular architecture with seven main components:
-
 ### 1. CLI (`src/cli/`)
 - **Entry Point**: `src/main.rs` and `src/cli/mod.rs`
-- **Configuration**: `src/cli/config.rs` handles CLI args and config file loading
-- Parses command-line arguments using `clap`
-- Supports both CLI args and TOML configuration files
+- **Configuration**: `src/cli/config.rs` handles CLI args, TOML config, `ExecutionConfig` (includes `--validate` flag)
+- Subcommands: `analyze` (invariant discovery), `translate` (C2Rust translation, feature-gated)
 
 ### 2. Parser (`src/parser/`)
-- **Core Module**: `src/parser/mod.rs`
-- **AST Extraction**: `src/parser/ast.rs` uses `syn` to extract Rust constructs
-- **Module Graph**: `src/parser/module_graph.rs` builds the crate's module hierarchy
-- Parses Rust source files and extracts:
-  - Type definitions (structs, enums)
-  - Function signatures and implementations
-  - Trait definitions and implementations
-  - PhantomData usage (typestate indicator)
-  - Doc comments and inline comments
+- **Core Module**: `src/parser/mod.rs` — tolerant multi-pass parsing:
+  - Pass 1: Strip `#![feature(...)]` and `#![cfg_attr(...)]`
+  - Pass 2: Strip `cfg_select! { ... }` blocks (brace-depth tracking)
+  - Pass 3: Replace `unsafe extern` → `extern` (edition 2024)
+  - Pass 4: Strip remaining inner attributes (except `#![doc]`, `#![allow]`)
+  - Pass 5: Item-level fallback (parse each top-level item individually)
+- **AST Extraction**: `src/parser/ast.rs` — uses `syn` with `proc-macro2` span-locations for real line numbers
+- **Module Graph**: `src/parser/module_graph.rs` — crate module hierarchy, multi-crate workspaces
 
 ### 3. Navigator (`src/navigation/`)
-- **Orchestration**: `src/navigation/mod.rs` coordinates exploration
-- **Explorer**: `src/navigation/explorer.rs` performs top-down module traversal
-- **Context**: `src/navigation/context.rs` identifies "interesting" code items
-- Implements hierarchical exploration starting from crate root
-- Identifies candidates for invariant analysis:
-  - Types with PhantomData (typestate)
-  - Types with Drop implementations (linear types)
-  - Methods that consume `self` (state transitions)
+- **Explorer**: `src/navigation/explorer.rs` — BFS module traversal
+- **Context**: `src/navigation/context.rs` — always clusters by type affinity (struct + its impls + related functions), span-based source extraction, sibling summaries
+- **Priority**: `src/navigation/priority.rs` — scoring: `--priority-modules` match (+1000), PhantomData (+50), Drop impl (+40), consuming self (+30), unsafe (+20), safety keywords (+10)
 
 ### 4. Detection (`src/detection/`)
-- **Coordinator**: `src/detection/mod.rs` routes items to specialized detectors
-- **State Machine**: `src/detection/state_machine.rs` detects typestate patterns
-- **Linear Types**: `src/detection/linear_types.rs` finds ordering invariants
-- **Ownership**: `src/detection/ownership.rs` analyzes lifetime patterns
-- **Evidence**: `src/detection/evidence.rs` extracts code snippets
-- Each detector uses specialized LLM prompts for its domain
-- Parses structured LLM responses to extract invariants
+- **Coordinator**: `src/detection/mod.rs` — routes chunks through the inference detector
+- **Invariant Inference**: `src/detection/invariant_inference.rs` — single LLM prompt with 8 ranked signal categories + 2 worked examples, JSON/text response parsing, compile-time noise filter, citation verification with confidence calibration
+- **Evidence**: `src/detection/evidence.rs` — formats chunks for LLM (prefers raw source, falls back to AST reconstruction)
+- **Validation**: `src/detection/validation.rs` — optional second-pass LLM verification (`--validate` flag)
 
 ### 5. LLM Integration (`src/llm/`)
-- **Client Trait**: `src/llm/types.rs` defines the LLM client interface
-- **OpenAI Client**: `src/llm/openai.rs` implements OpenAI API calls
-- Uses `async-openai` for API communication
-- Abstracts LLM provider behind a trait for future extensibility
-- Handles async API calls with error handling and retries
+- **Client Trait**: `src/llm/types.rs` — `LlmClient` trait, `LlmRequest`, `LlmResponse`
+- **OpenAI**: `src/llm/openai.rs` (async-openai)
+- **Anthropic**: `src/llm/anthropic.rs` (reqwest)
+- **Retry**: `src/llm/retry.rs` — exponential backoff with jitter, respects Retry-After
+- **Tracking**: `src/llm/tracking.rs` — transparent token accumulation via shared AtomicU64
 
 ### 6. Agent Loop (`src/agent/`)
-- **Main Orchestration**: `src/agent/mod.rs` contains `analyze_codebase()`
-- Ties all components together:
-  1. Creates LLM client
-  2. Builds module graph via Navigator
-  3. Explores codebase to find interesting items
-  4. Runs detectors on each item
-  5. Aggregates results into Report
-- Provides progress output during analysis
+- **Orchestrator**: `src/agent/mod.rs` — retry client → token tracker → priority scoring → semaphore-based parallel execution → deduplication → optional validation → report
+- **Progress**: `src/agent/progress.rs` — JSONL checkpointing, resume support
+- Priority chunks bypass token budget enforcement
+- Coverage stats tracked (priority vs. other modules)
 
 ### 7. Report Generation (`src/report/`)
-- **Report Types**: `src/report/mod.rs` defines Report, Invariant, Evidence structures
-- **Markdown**: `src/report/markdown.rs` generates formatted markdown output
-- **JSON**: `src/report/json.rs` generates JSON output
-- Groups invariants by type
-- Includes code snippets with locations
-- Summary statistics
+- **Report Types**: `src/report/mod.rs` — Report, Invariant (with `entity` field), Evidence, deduplication (by entity+title+type, keeps highest confidence)
+- **Markdown**: `src/report/markdown.rs`
+- **JSON**: `src/report/json.rs`
 
 ## Key Data Flow
 
 ```
-User Input (CLI)
-  → Config
-  → Navigator (builds module graph)
-  → Explorer (finds interesting items)
-  → Detector (analyzes with LLM)
-  → Report (formats results)
-  → Output (markdown/JSON)
+Rust codebase
+  → Multi-pass tolerant parsing (syn + fallbacks for nightly syntax)
+  → Module graph (single-crate or multi-crate)
+  → Type-affinity clustering (always clusters, even small modules)
+  → Priority scoring + budget partitioning
+  → LLM invariant inference (per-chunk, concurrent)
+  → Compile-time noise filtering
+  → Citation verification + confidence calibration
+  → Post-emission deduplication (entity+title+type key)
+  → Optional validation pass (second LLM call)
+  → Report (markdown/JSON)
+  → runs/<model>_<YYYYMMDD>_<HHMMSS>/
 ```
 
-## Important Implementation Details
+## Quality Pipeline
 
-### Typestate Detection
-The parser specifically looks for `PhantomData<T>` in struct fields to identify potential typestate patterns. When found, the detector:
-1. Extracts the struct and all related impl blocks
-2. Looks for methods that consume `self` and return different types
-3. Asks the LLM to confirm and explain the invariant
-
-### Linear Type Detection
-Identifies types with Drop implementations or explicit ordering requirements:
-1. Finds types with `impl Drop`
-2. Looks for methods that must be called in sequence
-3. Analyzes capability-passing patterns
-
-### Evidence Extraction
-Code snippets are formatted to include:
-- Struct definitions with fields
-- Relevant impl blocks with method signatures
-- Drop implementations where applicable
-
-### LLM Prompts
-Each detector uses specialized prompts that:
-- Define the invariant type being searched for
-- Provide examples of patterns to look for
-- Request structured output for easy parsing
+Invariants pass through multiple quality gates:
+1. **Prompt exclusions**: LLM instructed to skip cfg/compile-time/doc-policy invariants
+2. **Compile-time noise filter**: Post-parse filter on keywords like `cfg_select`, `conditional compilation`, `enum exhaustiveness`
+3. **Citation verification**: Evidence items with `line N:` citations checked against actual snippet; low citation rate downgrades confidence
+4. **Deduplication**: Same entity+title+type → keep highest confidence, longest evidence
+5. **Validation pass** (opt-in `--validate`): Second LLM call reviews each invariant for hallucination, misclassification
 
 ## Testing Strategy
 
-Tests are organized by module:
-- **Unit Tests**: Each module has its own `#[cfg(test)]` section
-- **Integration Tests**: `src/agent/mod.rs` has end-to-end test structure
-- **Test Data**: Uses `tempfile` crate to create temporary Rust projects
-- **Mocking**: LLM tests verify structure without requiring API keys
+Tests are organized by module (95 unit tests + 1 integration test):
+- **Parser**: tolerant parsing (cfg_select, unsafe extern, item-level fallback), line numbers from spans
+- **Navigation**: type-affinity clustering, priority scoring, always-clustering behavior
+- **Detection**: JSON/text parsing, compile-time noise filter, citation verification, confidence calibration, validation response parsing
+- **Report**: deduplication (same entity, different entities, confidence tiebreak)
+- **LLM**: retry logic, client creation
+- **Integration**: end-to-end parse of a typestate example project
 
 ## Configuration File Format
 
 ```toml
 [llm]
-provider = "openai"
-api_key = "sk-..."  # Or use OPENAI_API_KEY env var
-model = "gpt-4"
+provider = "anthropic"
+api_key = "sk-ant-..."
+model = "claude-sonnet-4-20250514"
 
 [exploration]
 max_depth = 10
@@ -180,27 +156,27 @@ max_items_per_module = 50
 context_window_tokens = 4000
 
 [detection]
-focus = ["state_machine", "linear_types", "ownership"]
+focus = ["temporal_ordering", "resource_lifecycle", "state_machine", "precondition", "protocol"]
+min_confidence = "medium"
+
+[execution]
+concurrency = 5
+token_budget = 1000000
+multi_crate = true
+priority_modules = ["sync", "io", "fs", "net", "cell"]
+validate = false
 ```
 
 ## Dependencies
 
 ### Key External Crates
-- **syn**: Rust parser for AST extraction
-- **quote**: Code generation (used for formatting types)
+- **syn** + **proc-macro2** (span-locations): Rust parser with line number tracking
+- **quote**: Code generation (formatting types)
 - **async-openai**: OpenAI API client
 - **clap**: CLI argument parsing
 - **tokio**: Async runtime
 - **serde/serde_json**: Serialization
 - **walkdir**: Recursive directory traversal
 - **anyhow/thiserror**: Error handling
-
-## Future Enhancements
-
-The codebase is structured to support:
-- Additional LLM providers (trait-based abstraction)
-- More invariant types (pluggable detector architecture)
-- Better line number tracking (currently set to 1 as placeholder)
-- Caching of LLM responses
-- Parallel analysis of multiple items
-- Pattern suggestion phase (Phase 2 of the project)
+- **chrono**: Timestamped run directories
+- **reqwest**: HTTP client (Anthropic API)

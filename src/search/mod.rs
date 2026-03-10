@@ -84,6 +84,7 @@ pub async fn search_for_invariants(
 
 /// A file region identified by search results (possibly merged from multiple hits)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct FileRegion {
     file_path: PathBuf,
     /// Relative path as returned by octocode (e.g., "src/foo.rs")

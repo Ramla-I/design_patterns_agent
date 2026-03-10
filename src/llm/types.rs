@@ -9,6 +9,7 @@ pub struct LlmRequest {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LlmResponse {
     pub content: String,
     pub tokens_used: usize,

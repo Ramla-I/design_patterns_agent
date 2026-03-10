@@ -45,5 +45,7 @@ CMD [ \
     "--priority-modules", "sync,io,fs,net,cell,collections,thread,process", \
     "--provider", "anthropic", \
     "--model", "claude-sonnet-4-20250514", \
-    "--token-budget", "1000000" \
+    "--token-budget", "1000000", \
+    "--validate", \
+    "--validation-model", "gpt-4o-mini" \
 ]

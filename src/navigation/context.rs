@@ -134,34 +134,7 @@ pub fn build_chunks(
         return vec![];
     }
 
-    // Build a single cluster first and check if it fits
-    let single_cluster = ItemCluster {
-        anchor_type: None,
-        structs: structs.clone(),
-        enums: enums.clone(),
-        functions: functions.clone(),
-        traits: traits.clone(),
-        impl_blocks: impl_blocks.clone(),
-    };
-
-    let estimated = single_cluster.estimated_tokens();
-
-    if estimated <= max_tokens {
-        // Whole module fits in one chunk
-        return vec![AnalysisChunk {
-            module_path: module.name.clone(),
-            file_path: module.path.clone(),
-            raw_source: truncate_source(raw_source, max_tokens * 4),
-            structs,
-            enums,
-            functions,
-            traits,
-            impl_blocks,
-            sibling_summary: None,
-        }];
-    }
-
-    // Need to split — cluster by type affinity
+    // Always cluster by type affinity for focused analysis
     let clusters = cluster_by_type_affinity(structs, enums, functions, traits, impl_blocks);
 
     // If still too large, truncate function bodies within clusters
@@ -332,7 +305,8 @@ fn strip_bodies(cluster: &mut ItemCluster) {
     }
 }
 
-/// Extract lines from raw source that are relevant to a cluster's types
+/// Extract lines from raw source that are relevant to a cluster's types.
+/// Uses line numbers from spans when available, falls back to name-mention heuristic.
 fn extract_relevant_source(raw_source: &str, cluster: &ItemCluster) -> String {
     let type_names = cluster.type_names_referenced();
     if type_names.is_empty() {
@@ -340,18 +314,71 @@ fn extract_relevant_source(raw_source: &str, cluster: &ItemCluster) -> String {
         return raw_source.to_string();
     }
 
-    // Find lines mentioning any of the type names and include surrounding context
     let lines: Vec<&str> = raw_source.lines().collect();
     let mut included = vec![false; lines.len()];
 
-    for (i, line) in lines.iter().enumerate() {
-        for name in &type_names {
-            if line.contains(name.as_str()) {
-                // Include 5 lines before and after
-                let start = i.saturating_sub(5);
-                let end = (i + 6).min(lines.len());
-                for j in start..end {
-                    included[j] = true;
+    // Collect known line numbers from spans (1-indexed)
+    let mut span_lines: Vec<usize> = Vec::new();
+    for s in &cluster.structs {
+        if s.source_location.line > 1 {
+            span_lines.push(s.source_location.line);
+        }
+    }
+    for e in &cluster.enums {
+        if e.source_location.line > 1 {
+            span_lines.push(e.source_location.line);
+        }
+    }
+    for imp in &cluster.impl_blocks {
+        if imp.source_location.line > 1 {
+            span_lines.push(imp.source_location.line);
+        }
+    }
+    for t in &cluster.traits {
+        if t.source_location.line > 1 {
+            span_lines.push(t.source_location.line);
+        }
+    }
+
+    if !span_lines.is_empty() {
+        // Use span-based extraction: from each start line, scan forward to closing brace
+        for &start_line in &span_lines {
+            let start_idx = start_line.saturating_sub(1); // convert to 0-indexed
+            if start_idx >= lines.len() {
+                continue;
+            }
+            // Scan forward from start_line to find the closing brace at depth 0
+            let mut depth: i32 = 0;
+            let mut end_idx = start_idx;
+            for i in start_idx..lines.len() {
+                for ch in lines[i].chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                end_idx = i;
+                if depth <= 0 && i > start_idx {
+                    break;
+                }
+            }
+            // Include a few lines before for doc comments/attributes
+            let actual_start = start_idx.saturating_sub(3);
+            for j in actual_start..=end_idx.min(lines.len() - 1) {
+                included[j] = true;
+            }
+        }
+    } else {
+        // Fallback: name-mention heuristic
+        for (i, line) in lines.iter().enumerate() {
+            for name in &type_names {
+                if line.contains(name.as_str()) {
+                    let start = i.saturating_sub(5);
+                    let end = (i + 6).min(lines.len());
+                    for j in start..end {
+                        included[j] = true;
+                    }
                 }
             }
         }
@@ -469,5 +496,45 @@ mod tests {
         assert_eq!(clusters[0].anchor_type.as_deref(), Some("Conn"));
         assert_eq!(clusters[0].impl_blocks.len(), 1);
         assert_eq!(clusters[1].functions.len(), 1);
+    }
+
+    #[test]
+    fn test_always_clusters_two_structs() {
+        // Two structs should produce 2 chunks even if total fits in one
+        let module = make_module("test", vec![
+            CodeItem::Struct(make_struct("Foo", vec![("x", "i32")])),
+            CodeItem::Struct(make_struct("Bar", vec![("y", "i32")])),
+        ]);
+
+        let chunks = build_chunks(&module, "struct Foo { x: i32 }\nstruct Bar { y: i32 }", 4000);
+        assert_eq!(chunks.len(), 2, "Two structs should produce 2 separate chunks");
+        // Both should have sibling summaries
+        assert!(chunks[0].sibling_summary.is_some());
+        assert!(chunks[1].sibling_summary.is_some());
+    }
+
+    #[test]
+    fn test_extract_source_by_line_range() {
+        let source = "// line 1\n// line 2\npub struct Foo {\n    x: i32,\n}\n// line 6\n// line 7\n";
+        let cluster = ItemCluster {
+            anchor_type: Some("Foo".to_string()),
+            structs: vec![StructDef {
+                name: "Foo".to_string(),
+                generics: String::new(),
+                fields: vec![],
+                visibility: Visibility::Public,
+                doc_comment: None,
+                has_phantom_data: false,
+                source_location: SourceLocation { file_path: "test.rs".to_string(), line: 3 },
+            }],
+            enums: vec![],
+            functions: vec![],
+            traits: vec![],
+            impl_blocks: vec![],
+        };
+
+        let result = extract_relevant_source(source, &cluster);
+        assert!(result.contains("pub struct Foo"), "Should include the struct definition");
+        assert!(result.contains("x: i32"), "Should include struct fields");
     }
 }

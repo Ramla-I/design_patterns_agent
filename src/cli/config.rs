@@ -29,6 +29,10 @@ pub struct ExecutionConfig {
     pub max_retries: u32,
     #[serde(default = "default_retry_base_delay")]
     pub retry_base_delay: u64,
+    #[serde(default)]
+    pub validate: bool,
+    #[serde(default)]
+    pub validation_model: Option<String>,
 }
 
 impl Default for ExecutionConfig {
@@ -41,6 +45,8 @@ impl Default for ExecutionConfig {
             multi_crate: false,
             max_retries: default_max_retries(),
             retry_base_delay: default_retry_base_delay(),
+            validate: false,
+            validation_model: None,
         }
     }
 }
@@ -187,6 +193,8 @@ impl Config {
                 multi_crate: args.multi_crate,
                 max_retries: args.max_retries,
                 retry_base_delay: args.retry_base_delay,
+                validate: args.validate,
+                validation_model: args.validation_model.clone(),
             },
         })
     }

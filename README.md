@@ -155,6 +155,9 @@ cargo run --release -- analyze /path/to/project --multi-crate --priority-modules
 # Resume from a previous run
 cargo run --release -- analyze /path/to/project --resume runs/<prev_run>/progress.jsonl
 
+# Validate invariants with a second LLM pass (filters hallucinations, doubles cost)
+cargo run --release -- analyze /path/to/project --validate
+
 # Semantic search mode — uses octocode for targeted search, faster for large codebases
 cargo run --release -- analyze /path/to/rust/project --search-mode semantic
 
@@ -229,6 +232,7 @@ cargo run --release -- translate /path/to/Public-Tests/ \
 | `--priority-modules <LIST>` | — | Comma-separated module prefixes to analyze first |
 | `--max-retries <N>` | `5` | Max retries per LLM call on transient errors |
 | `--retry-base-delay <SECS>` | `2` | Base delay for exponential backoff |
+| `--validate` | `false` | Run a validation pass on discovered invariants (doubles LLM cost) |
 
 **`translate` options:**
 
@@ -255,7 +259,7 @@ The agent is designed for long-running analysis of large codebases:
 
 **Graceful shutdown** — Ctrl+C lets in-flight LLM calls finish, then generates a partial report from results collected so far.
 
-**Tolerant parsing** — Files that fail `syn` parsing (e.g., nightly `#![feature(...)]` attributes) are retried with feature gates stripped. Unparseable files are logged and listed in the report's "Skipped Files" section.
+**Tolerant parsing** — Files that fail `syn` parsing go through a 5-pass recovery pipeline: strip `#![feature(...)]`/`#![cfg_attr(...)]`, strip `cfg_select! { ... }` blocks, replace `unsafe extern` → `extern` (edition 2024), strip remaining inner attributes, and finally item-level fallback parsing (parse each top-level item individually, skip failures). Unparseable files are logged and listed in the report's "Skipped Files" section.
 
 ## Configuration
 
@@ -289,6 +293,7 @@ multi_crate = true
 max_retries = 5
 retry_base_delay = 2
 priority_modules = ["sync", "io", "fs", "net", "cell"]
+validate = false                    # Second-pass LLM validation (doubles cost)
 ```
 
 ## How It Works
@@ -306,8 +311,9 @@ Rust codebase
 Analysis Chunks (raw source preserving comments + structured AST data)
   |
   |- Priority scoring: PhantomData (+50), Drop impl (+40), consuming self (+30),
-  |  unsafe (+20), safety keywords (+10), --priority-modules match (+100)
-  |- Large modules split by type-affinity clustering (struct + its impls + related functions)
+  |  unsafe (+20), safety keywords (+10), --priority-modules match (+1000)
+  |- Always clustered by type affinity (struct + its impls + related functions)
+  |- Span-based source extraction using real line numbers from proc-macro2
   |- Token estimation (4 chars/token); function bodies stripped if still over budget
   |- Sibling summaries give LLM awareness of other parts when module is split
   |
@@ -316,9 +322,17 @@ LLM Invariant Detection (one prompt per chunk, temperature 0.3)
   |
   |- Retry client: exponential backoff for 429/5xx/timeouts (up to --max-retries)
   |- Token tracking: accumulates usage across all calls
-  |- System prompt with 8 ranked signal categories + 2 worked examples
+  |- System prompt with 8 ranked signal categories + 2 worked examples + exclusion rules
   |- Requests per-state output (one JSON entry per distinct state per entity)
   |- JSON response parsing with text-based fallback
+  |- Priority chunks bypass token budget enforcement
+  |
+  v
+Quality Pipeline
+  |- Compile-time noise filter (cfg_select, conditional compilation, enum exhaustiveness)
+  |- Citation verification: evidence with 'line N:' checked against source; low rate → downgrade
+  |- Post-emission deduplication (entity+title+type key, keeps highest confidence)
+  |- Optional validation pass (--validate): second LLM call reviews each invariant
   |
   v
 Incremental Output
@@ -367,15 +381,18 @@ src/
 
   parser/
     ast.rs                   # syn-based AST extraction: structs, enums, functions (with bodies),
-                             #   traits, impl blocks, PhantomData detection, attributes, unsafe flag
+                             #   traits, impl blocks, PhantomData detection, attributes, unsafe flag.
+                             #   Uses proc-macro2 span-locations for real line numbers.
     module_graph.rs          # Crate module hierarchy via walkdir + mod declaration parsing.
                              #   Supports single crate (from_crate_root) and multi-crate workspace
                              #   (from_workspace) with crate-prefixed module names. Tracks parse failures.
+                             #   Multi-pass tolerant parsing (5 fallback strategies for nightly syntax).
 
   navigation/
     explorer.rs              # BFS module traversal, reads raw source per module
-    context.rs               # AnalysisChunk + ItemCluster: module chunking, type-affinity
-                             #   clustering, token estimation, body stripping, sibling summaries
+    context.rs               # AnalysisChunk + ItemCluster: always clusters by type affinity,
+                             #   span-based source extraction, token estimation, body stripping,
+                             #   sibling summaries
     priority.rs              # Chunk priority scoring for --priority-modules and heuristic signals
 
   search/
@@ -384,14 +401,16 @@ src/
     mod.rs                   # Search orchestrator: run queries, deduplicate, merge regions, build chunks
 
   detection/
-    invariant_inference.rs   # System prompt (8 signal categories, 2 worked examples),
-                             #   LLM request, JSON/text response parsing. Uses AtomicUsize for
-                             #   thread-safe ID generation.
+    invariant_inference.rs   # System prompt (8 signal categories, 2 worked examples, exclusion rules),
+                             #   LLM request, JSON/text response parsing, compile-time noise filter,
+                             #   citation verification with confidence calibration
     evidence.rs              # Formats chunks for LLM: prefers raw source, falls back to AST reconstruction
+    validation.rs            # Optional second-pass LLM verification of invariants (--validate flag)
 
   agent/
-    mod.rs                   # Top-level orchestrator: retry client -> token tracker -> semaphore-based
-                             #   parallel execution -> progress tracking -> graceful shutdown -> report
+    mod.rs                   # Top-level orchestrator: retry client -> token tracker -> priority partitioning ->
+                             #   semaphore-based parallel execution -> deduplication -> optional validation ->
+                             #   progress tracking -> graceful shutdown -> report
     progress.rs              # JSONL-based progress and invariant checkpointing. Resume support
                              #   (completed chunks skipped, failed chunks retried).
 
@@ -405,8 +424,8 @@ src/
     tracking.rs              # TokenTrackingClient: transparent token accumulation via shared AtomicU64
 
   report/
-    mod.rs                   # Report, Summary, Invariant, Evidence, InvariantType, Confidence,
-                             #   parse_failures list
+    mod.rs                   # Report, Summary, Invariant (with entity field), Evidence, InvariantType,
+                             #   Confidence, deduplication (entity+title+type key), parse_failures list
     markdown.rs              # Markdown report generation (grouped by invariant type, skipped files section)
     json.rs                  # JSON report generation (serde)
 
@@ -429,7 +448,7 @@ llm_translation = { path = "../llm_translation", optional = true }
 ## Development
 
 ```bash
-# Run all tests (75 tests + 1 integration)
+# Run all tests (95 unit + 1 integration)
 cargo test --no-default-features
 
 # Run tests for a specific module

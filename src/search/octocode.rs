@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -13,6 +12,7 @@ use tokio::sync::Mutex;
 
 /// A search result from octocode semantic search
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SearchResult {
     pub file_path: String,
     pub similarity: f32,

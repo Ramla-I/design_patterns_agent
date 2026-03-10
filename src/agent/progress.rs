@@ -33,6 +33,7 @@ pub struct ProgressTracker {
     pub invariants_found: AtomicUsize,
     pub total_tokens: AtomicU64,
     token_budget: u64,
+    #[allow(dead_code)]
     pub run_dir: PathBuf,
 }
 
@@ -179,6 +180,7 @@ impl ProgressTracker {
     }
 
     /// Load invariants from invariants.jsonl for building the final report
+    #[allow(dead_code)]
     pub fn load_invariants(path: &Path) -> Result<Vec<Invariant>> {
         let mut invariants = Vec::new();
         if !path.exists() {
@@ -271,6 +273,7 @@ mod tests {
             },
             suggested_pattern: "typestate".to_string(),
             confidence: crate::report::Confidence::High,
+            entity: String::new(),
         };
         tracker.record_invariant(&inv);
         drop(tracker);
