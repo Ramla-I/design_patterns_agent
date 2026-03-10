@@ -6,6 +6,8 @@ use crate::parser::{CodeItem, EnumDef, FunctionDef, ImplBlock, Module, StructDef
 /// May represent an entire module (if it fits in context) or a cluster of related items.
 #[derive(Debug, Clone)]
 pub struct AnalysisChunk {
+    /// Unique identifier for this chunk (module_path + index for dedup)
+    pub chunk_id: String,
     /// Module path (e.g., "crate::connection")
     pub module_path: String,
     /// File path on disk
@@ -169,7 +171,14 @@ pub fn build_chunks(
             // Extract raw source relevant to this cluster's types
             let chunk_source = extract_relevant_source(raw_source, &cluster);
 
+            let chunk_id = if summaries.len() > 1 {
+                format!("{}#{}", module.name, i)
+            } else {
+                module.name.clone()
+            };
+
             AnalysisChunk {
+                chunk_id,
                 module_path: module.name.clone(),
                 file_path: module.path.clone(),
                 raw_source: truncate_source(&chunk_source, max_tokens * 4),

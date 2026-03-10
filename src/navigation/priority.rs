@@ -83,6 +83,7 @@ mod tests {
 
     fn make_chunk(module_path: &str) -> AnalysisChunk {
         AnalysisChunk {
+            chunk_id: module_path.to_string(),
             module_path: module_path.to_string(),
             file_path: "test.rs".into(),
             raw_source: String::new(),

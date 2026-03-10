@@ -131,7 +131,7 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     let mut handles = Vec::new();
     for chunk in chunks {
         // Skip already-completed chunks (resume)
-        if tracker.is_completed(&chunk.module_path) {
+        if tracker.is_completed(&chunk.chunk_id) {
             continue;
         }
 
@@ -139,6 +139,7 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
         let tx = tx.clone();
         let detector = detector.clone();
         let llm_client = llm_client.clone();
+        let detector_stats = detector_stats.clone();
         let next_id = next_id.clone();
         let tracker = tracker.clone();
         let shutdown = shutdown.clone();
@@ -159,10 +160,17 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
                 return;
             }
 
+            let chunk_id = chunk.chunk_id.clone();
             let module_path = chunk.module_path.clone();
+
+            // Snapshot token stats before LLM call to measure per-chunk usage
+            let tokens_before = detector_stats.snapshot().total_tokens;
 
             match detector.detect(&chunk, llm_client.as_ref(), &next_id).await {
                 Ok(invariants) => {
+                    let tokens_after = detector_stats.snapshot().total_tokens;
+                    let chunk_tokens = tokens_after.saturating_sub(tokens_before);
+
                     let count = invariants.len();
                     // Record each invariant to JSONL
                     for inv in &invariants {
@@ -173,7 +181,7 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
                     } else {
                         other_analyzed.fetch_add(1, Ordering::Relaxed);
                     }
-                    tracker.record_result(&module_path, "completed", count, 0, None);
+                    tracker.record_result(&chunk_id, "completed", count, chunk_tokens, None);
                     tracker.print_status();
 
                     // Send invariants through channel for report assembly
@@ -182,9 +190,12 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
                     }
                 }
                 Err(e) => {
+                    let tokens_after = detector_stats.snapshot().total_tokens;
+                    let chunk_tokens = tokens_after.saturating_sub(tokens_before);
+
                     let err_msg = format!("{}", e);
                     eprintln!("    Error analyzing {}: {}", module_path, err_msg);
-                    tracker.record_result(&module_path, "failed", 0, 0, Some(&err_msg));
+                    tracker.record_result(&chunk_id, "failed", 0, chunk_tokens, Some(&err_msg));
                     tracker.print_status();
                 }
             }

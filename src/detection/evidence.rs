@@ -117,6 +117,7 @@ mod tests {
     #[test]
     fn test_format_chunk_prefers_raw_source() {
         let chunk = AnalysisChunk {
+            chunk_id: "test".to_string(),
             module_path: "test".to_string(),
             file_path: PathBuf::from("test.rs"),
             raw_source: "// Must call init before use\nfn init() {}\nfn use_it() {}".to_string(),
@@ -135,6 +136,7 @@ mod tests {
     #[test]
     fn test_format_chunk_with_sibling_summary() {
         let chunk = AnalysisChunk {
+            chunk_id: "test".to_string(),
             module_path: "test".to_string(),
             file_path: PathBuf::from("test.rs"),
             raw_source: "fn foo() {}".to_string(),
@@ -154,6 +156,7 @@ mod tests {
     #[test]
     fn test_reconstruct_from_ast_fallback() {
         let chunk = AnalysisChunk {
+            chunk_id: "test".to_string(),
             module_path: "test".to_string(),
             file_path: PathBuf::from("test.rs"),
             raw_source: String::new(),

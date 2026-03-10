@@ -160,7 +160,9 @@ fn results_to_chunks(
                 .replace("::lib", "crate")
                 .replace("::main", "crate");
 
+            let chunk_id = format!("{}#{}", module_path, chunks.len());
             chunks.push(AnalysisChunk {
+                chunk_id,
                 module_path,
                 file_path: file_path.clone(),
                 raw_source,
