@@ -31,7 +31,7 @@ pub struct OctocodeClient {
 
 impl OctocodeClient {
     /// Spawn the octocode MCP server for a given repository path.
-    /// Requires `octocode` to be installed and the repo to be indexed.
+    /// Automatically runs `octocode index` to ensure embeddings are up to date.
     pub async fn new(repo_path: &Path) -> Result<Self> {
         // Verify octocode is available
         let check = tokio::process::Command::new("which")
@@ -42,12 +42,25 @@ impl OctocodeClient {
         if check.is_err() || !check.unwrap().status.success() {
             anyhow::bail!(
                 "octocode not found. Install with:\n  \
-                 curl -fsSL https://raw.githubusercontent.com/Muvon/octocode/master/install.sh | sh\n\
-                 Then index your codebase:\n  \
-                 cd {} && octocode index",
-                repo_path.display()
+                 curl -fsSL https://raw.githubusercontent.com/Muvon/octocode/master/install.sh | sh"
             );
         }
+
+        // Auto-index: always run `octocode index` to ensure embeddings are up to date
+        eprintln!("  Indexing codebase with octocode...");
+        let index_output = tokio::process::Command::new("octocode")
+            .args(["index"])
+            .current_dir(repo_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to run octocode index")?;
+        if !index_output.status.success() {
+            let stderr = String::from_utf8_lossy(&index_output.stderr);
+            anyhow::bail!("octocode index failed: {}", stderr);
+        }
+        eprintln!("  Indexing complete.");
 
         let mut child = tokio::process::Command::new("octocode")
             .args(["mcp", "--path", &repo_path.to_string_lossy()])

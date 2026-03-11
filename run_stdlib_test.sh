@@ -3,9 +3,9 @@
 # run_stdlib_test.sh — Build and run the design patterns agent on the Rust standard library.
 #
 # Usage:
-#   ./run_stdlib_test.sh                          # uses ANTHROPIC_API_KEY from env
-#   ANTHROPIC_API_KEY=sk-ant-... ./run_stdlib_test.sh
-#   OPENAI_API_KEY=sk-... ./run_stdlib_test.sh --provider openai --model gpt-4o
+#   ./run_stdlib_test.sh                          # uses OPENAI_API_KEY from env (default: gpt-5.2)
+#   OPENAI_API_KEY=sk-... ./run_stdlib_test.sh
+#   ANTHROPIC_API_KEY=sk-ant-... ./run_stdlib_test.sh --provider anthropic --model claude-sonnet-4-20250514
 #
 # Any extra arguments are forwarded to the container and override the defaults.
 # Examples:
@@ -64,8 +64,8 @@ DEFAULT_ARGS=(
     "--multi-crate"
     "--concurrency" "5"
     "--priority-modules" "sync,io,fs,net,cell,collections,thread,process"
-    "--provider" "anthropic"
-    "--model" "claude-sonnet-4-20250514"
+    "--provider" "openai"
+    "--model" "gpt-5.2"
     "--token-budget" "1000000"
     "--validate"
     "--validation-model" "gpt-4o-mini"

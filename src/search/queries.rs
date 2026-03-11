@@ -11,7 +11,7 @@ pub const INVARIANT_QUERIES: &[InvariantQuery] = &[
     // Temporal ordering — "must call X before Y"
     InvariantQuery {
         query: "must call before initialize first",
-        mode: "doc",
+        mode: "docs",
         description: "Comment-based ordering requirements",
     },
     InvariantQuery {
@@ -64,7 +64,7 @@ pub const INVARIANT_QUERIES: &[InvariantQuery] = &[
     // Safety and preconditions
     InvariantQuery {
         query: "SAFETY assumes precondition invariant caller must ensure",
-        mode: "doc",
+        mode: "docs",
         description: "Safety comments documenting invariants",
     },
     InvariantQuery {

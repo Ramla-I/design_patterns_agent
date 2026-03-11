@@ -65,50 +65,25 @@ impl FileHandle {
 [
   {
     "entity": "FileHandle",
-    "name": "FileHandle::Open state",
-    "state": "Open",
+    "name": "FileHandle state machine (Open / Closed)",
     "kind": "state_machine",
-    "description": "FileHandle is in the Open state after open(); read() is valid, close() transitions to Closed",
-    "invariants": [
-      "is_open == true",
-      "file descriptor is valid",
-      "read() operations are valid"
-    ],
+    "states": ["Open", "Closed"],
+    "description": "FileHandle has two runtime states tracked by is_open: bool. In Open state read() is valid; close() transitions to Closed. In Closed state all operations return errors. The type system does not distinguish these states.",
     "transitions": ["Open -> Closed via close()"],
     "evidence": [
-      "is_open: bool field tracks state at runtime",
-      "if !self.is_open { return Err(\"closed\") } in read()",
-      "close(mut self) consumes ownership"
+      "line 3: is_open: bool field tracks state at runtime",
+      "line 12: if !self.is_open { return Err(\"closed\") } guards read()",
+      "line 15: close(mut self) consumes and transitions to Closed",
+      "line 16: Err(\"already closed\") names the invalid-state invariant"
     ],
     "suggested_pattern": "typestate",
     "implementation_sketch": "struct FileHandle<S> { fd: i32, _state: PhantomData<S> } with Open/Closed zero-sized types; read() only on FileHandle<Open>; close(self) -> FileHandle<Closed>",
-    "confidence": "high"
-  },
-  {
-    "entity": "FileHandle",
-    "name": "FileHandle::Closed state",
-    "state": "Closed",
-    "kind": "state_machine",
-    "description": "FileHandle is in the Closed state after close(); read() is invalid, no further transitions",
-    "invariants": [
-      "is_open == false",
-      "read() returns Err(\"closed\")",
-      "no valid operations remain"
-    ],
-    "transitions": [],
-    "evidence": [
-      "is_open set to false in close()",
-      "Err(\"already closed\") error message in close()",
-      "read() checks is_open before proceeding"
-    ],
-    "suggested_pattern": "typestate",
-    "implementation_sketch": "FileHandle<Closed> has no read() method — compile error instead of runtime Err",
     "confidence": "high"
   }
 ]
 ```
 
-**Why this is detected:** The `is_open` boolean field is a runtime encoding of two distinct states. The `if !self.is_open` checks in `read()` and `close()` are runtime guards that would be unnecessary if the type system enforced which state the handle is in. The error messages `"closed"` and `"already closed"` name the invariants directly.
+**Why this is good:** ONE entry per entity capturing the COMPLETE state machine — all states, all transitions, all evidence. The `is_open` boolean is a runtime encoding of two distinct states, and the guards/error messages are the evidence.
 
 ## Worked Example 2 — OnceCell / Option-based initialization
 
@@ -118,31 +93,17 @@ pub struct Config {
     inner: Option<ConfigData>,
 }
 
-struct ConfigData {
-    db_url: String,
-    pool_size: usize,
-}
-
 impl Config {
-    pub fn new() -> Self {
-        Config { inner: None }
-    }
+    pub fn new() -> Self { Config { inner: None } }
 
     /// Must be called before any get() calls.
     pub fn initialize(&mut self, db_url: String, pool_size: usize) {
-        if self.inner.is_some() {
-            panic!("Config already initialized");
-        }
+        if self.inner.is_some() { panic!("Config already initialized"); }
         self.inner = Some(ConfigData { db_url, pool_size });
     }
 
     pub fn db_url(&self) -> &str {
-        // Precondition: must call initialize() first
         self.inner.as_ref().expect("not initialized").db_url.as_str()
-    }
-
-    pub fn pool_size(&self) -> usize {
-        self.inner.as_ref().expect("not initialized").pool_size
     }
 }
 ```
@@ -152,58 +113,34 @@ impl Config {
 [
   {
     "entity": "Config",
-    "name": "Config::Uninitialized state",
-    "state": "Uninitialized",
+    "name": "Config initialization protocol (Uninitialized -> Initialized)",
     "kind": "temporal_ordering",
-    "description": "Config is created empty via new(); no getters are valid until initialize() is called",
-    "invariants": [
-      "inner == None",
-      "db_url() and pool_size() will panic",
-      "initialize() is the only valid operation"
-    ],
+    "states": ["Uninitialized", "Initialized"],
+    "description": "Config must have initialize() called before db_url()/pool_size(). Option<ConfigData> encodes this at runtime; getters panic if called before initialize(), and double-init panics.",
     "transitions": ["Uninitialized -> Initialized via initialize()"],
     "evidence": [
-      "inner: Option<ConfigData> field — None encodes uninitialized",
-      "expect(\"not initialized\") in db_url() and pool_size()",
-      "comment: \"Must be called before any get() calls.\""
+      "line 2: inner: Option<ConfigData> — None encodes uninitialized",
+      "line 8: comment: Must be called before any get() calls",
+      "line 10: panic!(\"Config already initialized\") guards double-init",
+      "line 14: expect(\"not initialized\") in db_url() — panic on wrong state"
     ],
     "suggested_pattern": "typestate",
-    "implementation_sketch": "Split into Config<Uninit> and Config<Init>; new() returns Config<Uninit>; initialize(self) -> Config<Init>; db_url()/pool_size() only on Config<Init>",
-    "confidence": "high"
-  },
-  {
-    "entity": "Config",
-    "name": "Config::Initialized state",
-    "state": "Initialized",
-    "kind": "temporal_ordering",
-    "description": "Config holds valid ConfigData after initialize(); getters are safe, re-initialization panics",
-    "invariants": [
-      "inner == Some(ConfigData { .. })",
-      "db_url() and pool_size() return valid values",
-      "initialize() panics with \"Config already initialized\""
-    ],
-    "transitions": [],
-    "evidence": [
-      "inner set to Some(..) in initialize()",
-      "panic!(\"Config already initialized\") guards against double-init",
-      "expect(\"not initialized\") would succeed"
-    ],
-    "suggested_pattern": "typestate",
-    "implementation_sketch": "Config<Init> has no initialize() method — double-init is a compile error instead of a runtime panic",
+    "implementation_sketch": "Split into Config<Uninit> and Config<Init>; initialize(self) -> Config<Init>; getters only on Config<Init>",
     "confidence": "high"
   }
 ]
 ```
 
-**Why this is detected:** The `Option<ConfigData>` field is a runtime encoding of Uninitialized/Initialized states. The `expect("not initialized")` calls in getters and the `panic!("Config already initialized")` guard in `initialize()` are runtime invariant checks. The comment "Must be called before any get() calls" explicitly names the temporal ordering requirement.
+**Why this is good:** ONE entry for the whole protocol. The description covers both states and the transition. Evidence cites specific lines.
 
 ## What to Report
 
-For each entity with implicit states, identify:
-1. **Each distinct state** the entity can be in (e.g., Open, Closed, Uninitialized, Initialized)
-2. **Invariants per state** — what must be true in that state
-3. **Valid transitions** — how to move between states (which method, consuming self or not)
-4. **Evidence** — specific fields, checks, error messages, or comments that reveal the state
+For each entity, produce **ONE invariant entry** that captures the complete picture:
+1. **All states** the entity can be in
+2. **All transitions** between those states
+3. **Evidence** — specific fields, checks, error messages, or comments
+
+**Produce ONE entry per entity, NOT one per state.** A FileHandle with Open/Closed states is ONE invariant, not two.
 
 ## Classification
 
@@ -228,13 +165,17 @@ Classify each invariant as:
 - **Only report invariants backed by concrete evidence in the code.** Do NOT invent methods, fields, or behaviors not present in the snippet.
 - **You MAY infer** states from: field types (Option<T>, enums, booleans, atomics), method signatures (self vs &self vs &mut self), error messages, comments, and API structure.
 - **You MAY NOT invent**: methods not shown in the snippet, fields not present, speculative behaviors without code support.
-- **Quality over quantity** — one well-evidenced invariant is better than five speculative ones.
+- **Quality over quantity** — one well-evidenced invariant is better than five speculative ones. Aim for 1-3 invariants per chunk, not 5-10.
+- **Only report if actionable** — the invariant should suggest a concrete type-system improvement. "This enum has variants" is not actionable. "This boolean field gates method validity and could be a typestate" IS actionable.
 
 EXCLUSIONS — do NOT report:
 - Conditional compilation (cfg, cfg_if, cfg_select, cfg_attr, feature gates)
 - Enum variant type safety (e.g. "TokenTree variant matches its data" — this is enforced by the type system)
+- Error types that simply describe failure modes (e.g., TryRecvError::Empty, SendError::Disconnected) — these are already encoded as enum variants
+- Guard/lock types whose state is already enforced by RAII (e.g., MutexGuard's lifetime)
 - Documentation or API stability policies
-- Properties that are already compile-time guarantees"#;
+- Properties that are already compile-time guarantees
+- Types that merely wrap or re-export other types without adding implicit state"#;
 
 impl InvariantInferenceDetector {
     pub fn new() -> Self {
@@ -250,7 +191,7 @@ impl InvariantInferenceDetector {
         let code_content = EvidenceExtractor::format_chunk(chunk);
 
         let user_prompt = format!(
-            r#"Analyze the following Rust code from module `{module_path}`. Focus on the primary type/entity in this chunk.
+            r#"Analyze the following Rust code from module `{module_path}`.
 Find latent invariants — implicit states, ordering requirements, and protocols that could be enforced at compile time.
 File: `{file_path}`
 
@@ -258,19 +199,18 @@ File: `{file_path}`
 {code}
 ```
 
-For each entity (struct, enum, or function group) with implicit states, produce one entry **per state**. Respond with a JSON array:
+For each entity with implicit state, produce **ONE entry per entity** (not one per state). Respond with a JSON array:
 
 ```json
 [
   {{
-    "entity": "the struct/type/module this invariant applies to",
-    "name": "short descriptive name (e.g., 'FileHandle::Open state')",
-    "state": "the specific state (e.g., 'Open', 'Uninitialized', 'Connected')",
+    "entity": "the struct/type this invariant applies to",
+    "name": "short name describing the whole invariant (e.g., 'FileHandle state machine (Open / Closed)')",
+    "states": ["State1", "State2"],
     "kind": "temporal_ordering | resource_lifecycle | state_machine | precondition | protocol",
-    "description": "what must be true in this state",
-    "invariants": ["condition 1 that holds in this state", "condition 2"],
-    "transitions": ["Open -> Closed via close()", "or empty if terminal state"],
-    "evidence": ["line 5: is_open boolean field", "line 12: if !self.is_open check guards read()", "line 17: Err(\"closed\") error message names the invariant"],
+    "description": "complete description covering all states, transitions, and what is NOT enforced by the type system",
+    "transitions": ["State1 -> State2 via method()", "..."],
+    "evidence": ["line 5: is_open boolean field", "line 12: if !self.is_open check guards read()"],
     "suggested_pattern": "typestate | builder | raii | newtype | session_type | capability",
     "implementation_sketch": "brief description of how to apply the pattern",
     "confidence": "high | medium | low"
@@ -278,11 +218,15 @@ For each entity (struct, enum, or function group) with implicit states, produce 
 ]
 ```
 
-Each `evidence` item SHOULD start with `line N:` referencing a specific line number in the code above. This helps verify the claim against the actual source.
+Each `evidence` item MUST reference concrete code: a field name, method name, error message, or comment. Starting with `line N:` is preferred but not required.
 
 If no meaningful invariants are found, respond with an empty array: `[]`
 
-Focus on invariants that are **implicit** — enforced by runtime checks, comments, boolean flags, Option<T> fields, or conventions rather than the type system. Ground every claim in specific code elements."#,
+Guidelines:
+- **ONE entry per entity**, covering ALL its states and transitions together.
+- **1-3 invariants per chunk** is typical. Only report genuinely latent invariants backed by strong evidence.
+- Skip error types, guard wrappers, and types whose state is already enforced by the type system.
+- Focus on invariants that are **actionable** — where a typestate, newtype, RAII, or capability pattern would eliminate a class of runtime errors."#,
             module_path = chunk.module_path,
             file_path = chunk.file_path.display(),
             code = code_content,
@@ -326,6 +270,7 @@ Focus on invariants that are **implicit** — enforced by runtime checks, commen
         let invariants = parsed
             .into_iter()
             .filter(|inv| !is_compile_time_noise(inv))
+            .filter(|inv| !is_enum_variant_noise(inv))
             .map(|inv| {
                 // Build rich explanation with state info
                 let mut explanation = String::new();
@@ -333,15 +278,16 @@ Focus on invariants that are **implicit** — enforced by runtime checks, commen
                 if !inv.entity.is_empty() {
                     explanation.push_str(&format!("**Entity:** {}\n\n", inv.entity));
                 }
-                if !inv.state.is_empty() {
-                    explanation.push_str(&format!("**State:** {}\n\n", inv.state));
-                }
-                if !inv.invariants.is_empty() {
-                    explanation.push_str("**State invariants:**\n");
-                    for i in &inv.invariants {
-                        explanation.push_str(&format!("- {}\n", i));
-                    }
-                    explanation.push('\n');
+                // Use new `states` list, falling back to legacy `state` field
+                let all_states: Vec<&str> = if !inv.states.is_empty() {
+                    inv.states.iter().map(|s| s.as_str()).collect()
+                } else if !inv.state.is_empty() {
+                    vec![inv.state.as_str()]
+                } else {
+                    vec![]
+                };
+                if !all_states.is_empty() {
+                    explanation.push_str(&format!("**States:** {}\n\n", all_states.join(", ")));
                 }
                 if !inv.transitions.is_empty() {
                     explanation.push_str("**Transitions:**\n");
@@ -353,11 +299,12 @@ Focus on invariants that are **implicit** — enforced by runtime checks, commen
                 explanation.push_str(&format!("**Evidence:** {}\n\n", inv.evidence.join("; ")));
                 explanation.push_str(&format!("**Implementation:** {}", inv.implementation_sketch));
 
-                // Citation verification: adjust confidence based on evidence quality
+                // Citation verification: check if evidence references real code
+                // Be lenient: evidence that names fields/methods/error messages without
+                // line numbers is still valuable. Only penalize fabricated citations.
                 let citation_rate = verify_citations(&inv.evidence, code_snippet);
-                let adjusted_confidence = if citation_rate < 0.5 {
-                    "low".to_string()
-                } else if citation_rate < 0.8 {
+                let adjusted_confidence = if citation_rate < 0.3 {
+                    // Most cited lines are wrong — likely hallucinated
                     downgrade_confidence(&inv.confidence)
                 } else {
                     inv.confidence.clone()
@@ -469,12 +416,14 @@ struct LlmInvariant {
     #[serde(default)]
     entity: String,
     name: String,
+    /// New format: list of states (e.g., ["Open", "Closed"])
+    #[serde(default)]
+    states: Vec<String>,
+    /// Legacy format: single state string (accepted for backward compat)
     #[serde(default)]
     state: String,
     kind: String,
     description: String,
-    #[serde(default)]
-    invariants: Vec<String>,
     #[serde(default)]
     transitions: Vec<String>,
     evidence: Vec<String>,
@@ -490,6 +439,39 @@ fn is_compile_time_noise(inv: &LlmInvariant) -> bool {
                   "enum exhaustiveness", "documentation policy",
                   "doc comment", "api stability", "compile-time"];
     noise.iter().any(|p| text.contains(p))
+}
+
+/// Filter out invariants that just describe enum variants / error types
+/// which are already enforced by the type system.
+fn is_enum_variant_noise(inv: &LlmInvariant) -> bool {
+    let entity = inv.entity.to_lowercase();
+    let desc = inv.description.to_lowercase();
+    let name = inv.name.to_lowercase();
+
+    // Error/Result types whose variants ARE the enforcement
+    let error_types = ["error", "result"];
+    let is_error_type = error_types.iter().any(|e| entity.contains(e));
+
+    // Description just explains what an enum variant means
+    let variant_descriptions = [
+        "represents the state where",
+        "this variant",
+        "enum variant",
+        "represents a",
+        "represents the",
+        "simply wraps",
+        "just describes",
+    ];
+    let is_variant_desc = variant_descriptions.iter().any(|p| desc.contains(p));
+
+    // Entity::Variant naming pattern with no real transitions
+    let is_single_variant_listing = name.contains("::") &&
+        (name.ends_with(" state") || name.ends_with(" variant")) &&
+        inv.transitions.is_empty() &&
+        inv.states.len() <= 1 &&
+        inv.state.is_empty();
+
+    (is_error_type && is_variant_desc) || is_single_variant_listing
 }
 
 // --- Parsing helpers ---
@@ -552,6 +534,7 @@ fn parse_confidence(confidence: &str) -> Confidence {
 
 fn verify_citations(evidence: &[String], snippet: &str) -> f64 {
     let lines: Vec<&str> = snippet.lines().collect();
+    let snippet_lower = snippet.to_lowercase();
     let mut verified = 0;
     let mut total = 0;
     for ev in evidence {
@@ -563,18 +546,22 @@ fn verify_citations(evidence: &[String], snippet: &str) -> f64 {
                     if cited_text.is_empty() {
                         continue;
                     }
-                    // Check line_num (1-indexed) and ±2 neighbors
-                    let idx = line_num.saturating_sub(1); // convert to 0-indexed
-                    let start = idx.saturating_sub(2);
-                    let end = (idx + 3).min(lines.len());
+                    // Check line_num (1-indexed) and ±5 neighbors (generous window
+                    // because chunks may have different line numbering than the LLM sees)
+                    let idx = line_num.saturating_sub(1);
+                    let start = idx.saturating_sub(5);
+                    let end = (idx + 6).min(lines.len());
                     if (start..end).any(|i| lines[i].contains(cited_text)) {
+                        verified += 1;
+                    } else if snippet_lower.contains(&cited_text.to_lowercase()) {
+                        // Content exists in snippet, just at a different line
                         verified += 1;
                     }
                 }
             }
         }
     }
-    if total == 0 { return 0.5; } // no citations → neutral
+    if total == 0 { return 0.5; } // no line citations → neutral (don't penalize)
     verified as f64 / total as f64
 }
 
@@ -694,10 +681,11 @@ mod tests {
         let noisy = LlmInvariant {
             entity: "TokenTree".to_string(),
             name: "Conditional compilation guard".to_string(),
+            states: vec![],
             state: String::new(),
             kind: "precondition".to_string(),
             description: "cfg_select macro ensures correct platform code".to_string(),
-            invariants: vec![],
+
             transitions: vec![],
             evidence: vec![],
             suggested_pattern: String::new(),
@@ -708,18 +696,56 @@ mod tests {
 
         let good = LlmInvariant {
             entity: "Connection".to_string(),
-            name: "Connection::Open state".to_string(),
-            state: "Open".to_string(),
+            name: "Connection state machine (Open / Closed)".to_string(),
+            states: vec!["Open".to_string(), "Closed".to_string()],
+            state: String::new(),
             kind: "state_machine".to_string(),
             description: "Connection must be opened before reading".to_string(),
-            invariants: vec![],
-            transitions: vec![],
+
+            transitions: vec!["Open -> Closed via close()".to_string()],
             evidence: vec![],
             suggested_pattern: "typestate".to_string(),
             implementation_sketch: String::new(),
             confidence: "high".to_string(),
         };
         assert!(!is_compile_time_noise(&good));
+    }
+
+    #[test]
+    fn test_enum_variant_noise_filter() {
+        // Error type describing variants — should be filtered
+        let error_noise = LlmInvariant {
+            entity: "TryRecvError".to_string(),
+            name: "TryRecvError::Empty state".to_string(),
+            states: vec![],
+            state: String::new(),
+            kind: "state_machine".to_string(),
+            description: "Represents the state where a recv could not obtain a message".to_string(),
+
+            transitions: vec![],
+            evidence: vec![],
+            suggested_pattern: "newtype".to_string(),
+            implementation_sketch: String::new(),
+            confidence: "low".to_string(),
+        };
+        assert!(is_enum_variant_noise(&error_noise));
+
+        // Real state machine — should NOT be filtered
+        let real = LlmInvariant {
+            entity: "Channel<T>".to_string(),
+            name: "Channel state machine (Connected / Disconnected)".to_string(),
+            states: vec!["Connected".to_string(), "Disconnected".to_string()],
+            state: String::new(),
+            kind: "state_machine".to_string(),
+            description: "Channel transitions from Connected to Disconnected when all senders drop".to_string(),
+
+            transitions: vec!["Connected -> Disconnected via disconnect()".to_string()],
+            evidence: vec!["line 5: mark bit in tail".to_string()],
+            suggested_pattern: "typestate".to_string(),
+            implementation_sketch: String::new(),
+            confidence: "medium".to_string(),
+        };
+        assert!(!is_enum_variant_noise(&real));
     }
 
     #[test]

@@ -58,15 +58,25 @@ cargo run --release -- /path/to/rust/project
 
 Results are always saved to a timestamped run directory:
 ```
-runs/<model>_<YYYYMMDD>_<HHMMSS>/report.md
+runs/<model>_<YYYYMMDD>_<HHMMSS>_<mode>/report.md
 ```
-Previous runs are never overwritten.
+The `<mode>` suffix is `_bfs` for exhaustive mode or `_ss` for semantic search. Previous runs are never overwritten.
 
 ## Running on the Rust Standard Library
 
 The agent supports analyzing large multi-crate workspaces like the Rust standard library (`core`, `alloc`, `std`). A Docker setup and shell script handle everything.
 
-### One-command run
+### Targeted sync module test
+
+```bash
+# Analyze only std::sync (fast, ~200K tokens)
+OPENAI_API_KEY=sk-... ./run_stdlib_sync_test.sh
+
+# With a different provider
+./run_stdlib_sync_test.sh --provider anthropic --model claude-sonnet-4-20250514
+```
+
+### Full stdlib run (Docker)
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... ./run_stdlib_test.sh
@@ -126,10 +136,11 @@ docker run --rm \
 Each run creates a timestamped directory under `runs/`:
 
 ```
-runs/claude-sonnet-4-20250514_20260309_143201/
+runs/claude-sonnet-4-20250514_20260309_143201_bfs/
   progress.jsonl      # One line per analyzed chunk (status, tokens, timestamp)
   invariants.jsonl    # One serialized Invariant per line (incremental, survives crashes)
   report.md           # Final formatted report (generated at end)
+  token_usage.json    # Token breakdown (input/cached/output/total for detector and validator)
 ```
 
 ## Usage
@@ -173,22 +184,23 @@ cargo run --release -- analyze /path/to/rust/project --config config.toml
 | Mode | Flag | How it works | Trade-offs |
 |------|------|-------------|------------|
 | **Exhaustive** (default) | `--search-mode exhaustive` | Parses every `.rs` file with `syn`, builds module-level analysis chunks, sends all to LLM | 100% coverage. More expensive for large codebases. |
-| **Semantic** | `--search-mode semantic` | Runs 12 targeted semantic queries via [octocode](https://github.com/Muvon/octocode) for invariant signals. Only sends high-relevance code to LLM. | Much faster and cheaper. May miss signals not covered by the predefined queries. |
+| **Semantic** | `--search-mode semantic` | Runs 12 targeted semantic queries via [octocode](https://github.com/Muvon/octocode) for invariant signals. Only sends high-relevance code to LLM. | Faster and cheaper on large codebases. May miss signals not covered by the predefined queries. |
 
-**Semantic mode setup** (one-time):
+The two modes are **complementary** — semantic search finds more unique high-confidence entities on larger modules, while BFS provides complete coverage on smaller ones. See [reports/bfs_vs_semantic_search_comparison.md](reports/bfs_vs_semantic_search_comparison.md) for a detailed comparison across `std::sync`, `std::io`, and `std::net`.
+
+**Semantic mode prerequisites:**
 
 ```bash
-# Install octocode
+# Install octocode (one-time)
 curl -fsSL https://raw.githubusercontent.com/Muvon/octocode/master/install.sh | sh
 
-# Configure embedding model
+# Configure embedding model (one-time)
 octocode config \
   --code-embedding-model "openai:text-embedding-3-small" \
   --text-embedding-model "openai:text-embedding-3-small"
-
-# Index the target codebase
-cd /path/to/rust/project && octocode index
 ```
+
+The tool automatically initializes a git repo (if needed) and runs `octocode index` before searching, so no manual indexing step is required.
 
 ### Translation (requires `translation` feature)
 
@@ -323,15 +335,19 @@ LLM Invariant Detection (one prompt per chunk, temperature 0.3)
   |- Retry client: exponential backoff for 429/5xx/timeouts (up to --max-retries)
   |- Token tracking: accumulates usage across all calls
   |- System prompt with 8 ranked signal categories + 2 worked examples + exclusion rules
-  |- Requests per-state output (one JSON entry per distinct state per entity)
+  |- Requests ONE entry per entity covering all states and transitions
   |- JSON response parsing with text-based fallback
   |- Priority chunks bypass token budget enforcement
   |
   v
 Quality Pipeline
   |- Compile-time noise filter (cfg_select, conditional compilation, enum exhaustiveness)
-  |- Citation verification: evidence with 'line N:' checked against source; low rate → downgrade
-  |- Post-emission deduplication (entity+title+type key, keeps highest confidence)
+  |- Enum variant noise filter (error types describing variants, single-variant listings)
+  |- Citation verification: evidence with 'line N:' checked against source (±5 line window
+  |  + content fallback); <30% verified → confidence downgrade
+  |- Post-emission deduplication:
+  |    Phase 1: exact key (entity+title+type), keeps highest confidence
+  |    Phase 2: fuzzy dedup (same entity+type, >60% title word overlap)
   |- Optional validation pass (--validate): second LLM call reviews each invariant
   |
   v
@@ -341,7 +357,7 @@ Incremental Output
   |
   v
 Report (Markdown or JSON, grouped by invariant type, with skipped-files section)
-  -> runs/<model>_<YYYYMMDD>_<HHMMSS>/report.{md,json}
+  -> runs/<model>_<YYYYMMDD>_<HHMMSS>_<bfs|ss>/report.{md,json}
 ```
 
 ### What the LLM Looks For (ranked by signal reliability)
@@ -396,21 +412,24 @@ src/
     priority.rs              # Chunk priority scoring for --priority-modules and heuristic signals
 
   search/
-    octocode.rs              # Async MCP client (JSON-RPC 2.0 over subprocess stdin/stdout)
+    octocode.rs              # Async MCP client (JSON-RPC 2.0 over subprocess stdin/stdout),
+                             #   auto-indexes codebase on startup
     queries.rs               # 12 predefined semantic queries targeting invariant signals
     mod.rs                   # Search orchestrator: run queries, deduplicate, merge regions, build chunks
 
   detection/
     invariant_inference.rs   # System prompt (8 signal categories, 2 worked examples, exclusion rules),
-                             #   LLM request, JSON/text response parsing, compile-time noise filter,
+                             #   LLM request (one entry per entity), JSON/text response parsing,
+                             #   compile-time noise filter, enum variant noise filter,
                              #   citation verification with confidence calibration
     evidence.rs              # Formats chunks for LLM: prefers raw source, falls back to AST reconstruction
     validation.rs            # Optional second-pass LLM verification of invariants (--validate flag)
 
   agent/
-    mod.rs                   # Top-level orchestrator: retry client -> token tracker -> priority partitioning ->
-                             #   semaphore-based parallel execution -> deduplication -> optional validation ->
-                             #   progress tracking -> graceful shutdown -> report
+    mod.rs                   # Top-level orchestrator: auto git-init -> retry client -> token tracker ->
+                             #   priority partitioning -> semaphore-based parallel execution ->
+                             #   deduplication -> optional validation -> progress tracking ->
+                             #   graceful shutdown -> report (run dir suffixed with _bfs or _ss)
     progress.rs              # JSONL-based progress and invariant checkpointing. Resume support
                              #   (completed chunks skipped, failed chunks retried).
 
@@ -425,13 +444,16 @@ src/
 
   report/
     mod.rs                   # Report, Summary, Invariant (with entity field), Evidence, InvariantType,
-                             #   Confidence, deduplication (entity+title+type key), parse_failures list
+                             #   Confidence, two-phase deduplication (exact key + fuzzy title overlap),
+                             #   parse_failures list
     markdown.rs              # Markdown report generation (grouped by invariant type, skipped files section)
     json.rs                  # JSON report generation (serde)
 
 runs/                        # Timestamped output directories (never overwritten)
+reports/                     # Analysis and comparison reports
 Dockerfile                   # Multi-stage build for stdlib analysis
-run_stdlib_test.sh           # One-command script to build and run on the Rust stdlib
+run_stdlib_test.sh           # One-command script to build and run on the full Rust stdlib (Docker)
+run_stdlib_sync_test.sh      # Targeted test on std::sync only (no Docker, local build)
 ```
 
 ### Feature Flags
@@ -448,7 +470,7 @@ llm_translation = { path = "../llm_translation", optional = true }
 ## Development
 
 ```bash
-# Run all tests (95 unit + 1 integration)
+# Run all tests (102 unit + 1 integration)
 cargo test --no-default-features
 
 # Run tests for a specific module

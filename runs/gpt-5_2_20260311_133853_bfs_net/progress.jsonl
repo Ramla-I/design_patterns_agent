@@ -1,0 +1,9 @@
+{"module_path":"net::udp","status":"completed","invariants_found":2,"tokens_used":7414,"timestamp":"2026-03-11T17:39:07.006598+00:00","error":null}
+{"module_path":"net::tcp#1","status":"completed","invariants_found":2,"tokens_used":13858,"timestamp":"2026-03-11T17:39:10.225718+00:00","error":null}
+{"module_path":"net::tcp#0","status":"completed","invariants_found":2,"tokens_used":21485,"timestamp":"2026-03-11T17:39:10.619074+00:00","error":null}
+{"module_path":"net#0","status":"completed","invariants_found":0,"tokens_used":10232,"timestamp":"2026-03-11T17:39:11.304241+00:00","error":null}
+{"module_path":"net::tcp#2","status":"completed","invariants_found":2,"tokens_used":20367,"timestamp":"2026-03-11T17:39:23.453987+00:00","error":null}
+{"module_path":"net::tcp#3","status":"completed","invariants_found":0,"tokens_used":2594,"timestamp":"2026-03-11T17:39:25.804222+00:00","error":null}
+{"module_path":"net::socket_addr","status":"completed","invariants_found":2,"tokens_used":12311,"timestamp":"2026-03-11T17:39:27.330305+00:00","error":null}
+{"module_path":"net#1","status":"completed","invariants_found":1,"tokens_used":19066,"timestamp":"2026-03-11T17:39:28.465093+00:00","error":null}
+{"module_path":"net::test","status":"completed","invariants_found":2,"tokens_used":13886,"timestamp":"2026-03-11T17:39:39.655177+00:00","error":null}

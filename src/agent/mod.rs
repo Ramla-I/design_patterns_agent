@@ -3,7 +3,7 @@ pub mod progress;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::sync::Semaphore;
 
@@ -23,6 +23,10 @@ use self::progress::ProgressTracker;
 /// Returns the report and the path to the run directory where progress files are stored.
 pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, std::path::PathBuf)> {
     println!("Initializing analysis of codebase at: {}", path.display());
+
+    // Ensure the target is a git repository (required by octocode in semantic mode;
+    // runs unconditionally so both modes behave consistently on fresh directories)
+    ensure_git_repo(path)?;
 
     // Create LLM client
     println!("Connecting to LLM provider: {}", config.llm.provider);
@@ -80,7 +84,7 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     );
 
     // Set up run directory and progress tracker
-    let run_dir = create_run_dir(&config.llm.model)?;
+    let run_dir = create_run_dir(&config.llm.model, &config.search.mode)?;
     let tracker = Arc::new(ProgressTracker::new(
         &run_dir,
         chunks.len(),
@@ -362,13 +366,53 @@ pub async fn analyze_codebase(path: &Path, config: &Config) -> Result<(Report, s
     Ok((report, run_dir))
 }
 
+/// Ensure the target path is a git repository. If not, initialize one.
+fn ensure_git_repo(path: &Path) -> Result<()> {
+    let git_dir = path.join(".git");
+    if git_dir.exists() {
+        return Ok(());
+    }
+
+    eprintln!("Initializing git repo at {} ...", path.display());
+    let status = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Failed to run git init")?;
+    if !status.success() {
+        anyhow::bail!("git init failed in {}", path.display());
+    }
+
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    Ok(())
+}
+
 /// Create a timestamped run directory: runs/<model>_<YYYYMMDD>_<HHMMSS>/
-fn create_run_dir(model: &str) -> Result<std::path::PathBuf> {
+fn create_run_dir(model: &str, search_mode: &SearchMode) -> Result<std::path::PathBuf> {
     let now = chrono::Local::now();
+    let suffix = match search_mode {
+        SearchMode::Exhaustive => "_bfs",
+        SearchMode::Semantic => "_ss",
+    };
     let dir_name = format!(
-        "{}_{}",
+        "{}_{}{}",
         model.replace(['/', '.', ':'], "_"),
-        now.format("%Y%m%d_%H%M%S")
+        now.format("%Y%m%d_%H%M%S"),
+        suffix,
     );
     let run_dir = std::path::PathBuf::from("runs").join(dir_name);
     std::fs::create_dir_all(&run_dir)?;

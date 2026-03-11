@@ -202,9 +202,11 @@ impl ModuleGraph {
                 .submodules
                 .iter()
                 .filter_map(|sub| {
-                    let full_name = if module.is_root {
+                    let full_name = if module.is_root && self.modules.contains_key(sub) {
+                        // Single-crate mode: root "crate" has children like "foo"
                         sub.clone()
                     } else {
+                        // Multi-crate mode or non-root: "std" -> "std::sync"
                         format!("{}::{}", module_name, sub)
                     };
                     self.modules.get(&full_name)
@@ -367,5 +369,178 @@ mod tests {
         assert!(root.submodules.contains(&"bar".to_string()));
         assert!(root.submodules.contains(&"baz".to_string()));
         assert!(!root.submodules.contains(&"commented_out".to_string()));
+    }
+
+    /// Mimics std::sync's 3-level module hierarchy to verify multi-crate
+    /// workspace traversal descends past crate roots.
+    ///
+    /// Structure:
+    ///   workspace (synthetic root)
+    ///   └── std (crate root = src/lib.rs)
+    ///       ├── mpsc, barrier, lazy_lock, once_lock, reentrant_lock
+    ///       ├── poison (src/sync/poison.rs)
+    ///       │   ├── condvar, mutex, once, rwlock
+    ///       └── mpmc (src/sync/mpmc/mod.rs)
+    ///           ├── array, context, counter, error, list, select, utils, waker, zero
+    fn create_std_sync_workspace(temp_dir: &Path) -> PathBuf {
+        let src = temp_dir.join("std/src");
+        let sync = src.join("sync");
+        let mpmc = sync.join("mpmc");
+        let poison_dir = sync.join("poison");
+        fs::create_dir_all(&mpmc).unwrap();
+        fs::create_dir_all(&poison_dir).unwrap();
+
+        // lib.rs declares a single top-level module: sync
+        fs::write(src.join("lib.rs"), "pub mod sync;\n").unwrap();
+
+        // sync/mod.rs mirrors real std::sync
+        fs::write(
+            sync.join("mod.rs"),
+            "pub mod mpmc;\npub mod mpsc;\npub mod poison;\n\
+             mod barrier;\nmod lazy_lock;\nmod once_lock;\nmod reentrant_lock;\n",
+        )
+        .unwrap();
+
+        // Level-1 leaf modules
+        for name in ["mpsc", "barrier", "lazy_lock", "once_lock", "reentrant_lock"] {
+            fs::write(sync.join(format!("{}.rs", name)), format!("pub struct {};\n", name)).unwrap();
+        }
+
+        // poison.rs declares 4 child modules
+        fs::write(
+            sync.join("poison.rs"),
+            "mod condvar;\nmod mutex;\npub(crate) mod once;\nmod rwlock;\n\
+             pub struct PoisonError;\n",
+        )
+        .unwrap();
+        for name in ["condvar", "mutex", "once", "rwlock"] {
+            fs::write(poison_dir.join(format!("{}.rs", name)), format!("pub struct {};\n", name)).unwrap();
+        }
+
+        // mpmc/mod.rs declares 9 child modules
+        fs::write(
+            mpmc.join("mod.rs"),
+            "mod array;\nmod context;\nmod counter;\nmod error;\n\
+             mod list;\nmod select;\nmod utils;\nmod waker;\nmod zero;\n\
+             pub struct Channel;\n",
+        )
+        .unwrap();
+        for name in ["array", "context", "counter", "error", "list", "select", "utils", "waker", "zero"] {
+            fs::write(mpmc.join(format!("{}.rs", name)), format!("pub struct {};\n", name)).unwrap();
+        }
+
+        src.join("lib.rs")
+    }
+
+    #[test]
+    fn test_workspace_children_traverse_all_levels() {
+        let temp_dir = TempDir::new().unwrap();
+        let root_path = create_std_sync_workspace(temp_dir.path());
+
+        let crate_roots = vec![("std".to_string(), root_path)];
+        let graph = ModuleGraph::from_workspace(crate_roots).unwrap();
+
+        // Workspace root should list "std"
+        let ws_children: Vec<&str> = graph.children("workspace").iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(ws_children, vec!["std"]);
+
+        // Crate root "std" should find its child "std::sync"
+        let std_children: Vec<&str> = graph.children("std").iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(std_children, vec!["std::sync"]);
+
+        // std::sync should find all 7 level-1 children
+        let mut sync_children: Vec<String> = graph.children("std::sync").iter().map(|m| m.name.clone()).collect();
+        sync_children.sort();
+        assert_eq!(
+            sync_children,
+            vec![
+                "std::sync::barrier",
+                "std::sync::lazy_lock",
+                "std::sync::mpmc",
+                "std::sync::mpsc",
+                "std::sync::once_lock",
+                "std::sync::poison",
+                "std::sync::reentrant_lock",
+            ]
+        );
+
+        // std::sync::mpmc should find all 9 level-2 children
+        let mut mpmc_children: Vec<String> = graph.children("std::sync::mpmc").iter().map(|m| m.name.clone()).collect();
+        mpmc_children.sort();
+        assert_eq!(
+            mpmc_children,
+            vec![
+                "std::sync::mpmc::array",
+                "std::sync::mpmc::context",
+                "std::sync::mpmc::counter",
+                "std::sync::mpmc::error",
+                "std::sync::mpmc::list",
+                "std::sync::mpmc::select",
+                "std::sync::mpmc::utils",
+                "std::sync::mpmc::waker",
+                "std::sync::mpmc::zero",
+            ]
+        );
+
+        // std::sync::poison should find all 4 level-2 children
+        let mut poison_children: Vec<String> = graph.children("std::sync::poison").iter().map(|m| m.name.clone()).collect();
+        poison_children.sort();
+        assert_eq!(
+            poison_children,
+            vec![
+                "std::sync::poison::condvar",
+                "std::sync::poison::mutex",
+                "std::sync::poison::once",
+                "std::sync::poison::rwlock",
+            ]
+        );
+
+        // Total module count: 1 workspace + 1 std + 1 sync + 7 level-1 + 9 mpmc + 4 poison = 23
+        assert_eq!(graph.modules().count(), 23);
+    }
+
+    #[test]
+    fn test_workspace_explorer_visits_all_nested_modules() {
+        use crate::navigation::Explorer;
+
+        let temp_dir = TempDir::new().unwrap();
+        let root_path = create_std_sync_workspace(temp_dir.path());
+
+        let crate_roots = vec![("std".to_string(), root_path)];
+        let graph = ModuleGraph::from_workspace(crate_roots).unwrap();
+
+        let mut explorer = Explorer::new(&graph, 10, 4000);
+        let chunks = explorer.explore();
+
+        // Explorer visits all 23 modules (workspace root produces no chunks since it has no file)
+        // but all real modules should be visited
+        assert_eq!(explorer.visited_count(), 23);
+
+        // Chunks come from modules with actual content (22 real modules, workspace has empty path)
+        // Some modules may produce 0 chunks if they have no items, but most have a struct
+        assert!(
+            chunks.len() >= 20,
+            "Expected at least 20 chunks from 22 real modules, got {}",
+            chunks.len()
+        );
+
+        // Verify deepest-level modules are present in chunks
+        let chunk_modules: std::collections::HashSet<&str> =
+            chunks.iter().map(|c| c.module_path.as_str()).collect();
+        assert!(chunk_modules.contains("std::sync::mpmc::waker"), "Missing deep module mpmc::waker");
+        assert!(chunk_modules.contains("std::sync::poison::mutex"), "Missing deep module poison::mutex");
+    }
+
+    /// Verify the fix doesn't regress single-crate mode (bare submodule names).
+    #[test]
+    fn test_single_crate_children_still_work() {
+        let temp_dir = TempDir::new().unwrap();
+        let root_path = create_test_crate(temp_dir.path());
+
+        let graph = ModuleGraph::from_crate_root(&root_path).unwrap();
+
+        let children = graph.children("crate");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "foo");
     }
 }
