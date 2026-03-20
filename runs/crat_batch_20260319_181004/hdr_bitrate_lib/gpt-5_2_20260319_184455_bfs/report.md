@@ -1,0 +1,100 @@
+# Latent Invariant Analysis Report
+
+## Summary
+
+- **Total invariants discovered**: 1
+- **Temporal ordering**: 0
+- **Resource lifecycle**: 0
+- **State machine**: 0
+- **Precondition**: 1
+- **Protocol**: 0
+- **Modules analyzed**: 2
+
+## Precondition Invariants
+
+### 1. MP3 header buffer validity precondition (non-null, sufficiently long, and structurally valid header bits)
+
+**Location**: `/data/test_case/lib.rs:1-58`
+
+**Confidence**: high
+
+**Suggested Pattern**: newtype
+
+**Description**: The API implicitly assumes the caller provides a valid pointer to at least 1024 readable bytes containing an MPEG audio header with meaningful bitfields. This is not enforced by the type system: `hdr_bitrate` accepts a raw `*const u8`, and constructs `from_raw_parts(h, 1024)`, which requires the pointer be non-null and point to 1024 bytes of valid memory. Additionally, `hdr_bitrate_internal` conceptually expects at least 3 bytes and specific bitfield ranges (table/layer/index) for meaningful lookup; the code currently clamps/zeros invalid/short inputs to avoid panics, but that silently converts invalid states into a "0 bitrate"-like result rather than making invalidity unrepresentable or explicit.
+
+**Evidence**:
+
+```rust
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![feature(c_variadic)]
+#![feature(extern_types)]
+#![feature(linkage)]
+#![feature(rustc_private)]
+#![feature(thread_local)]
+#![feature(formatting_options)]
+
+pub(crate) fn hdr_bitrate_internal(h: &[u8]) -> u32 {
+    static HALFRATE: [[[u8; 15]; 3]; 2] = [
+        [
+            [0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 72, 80],
+            [0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 72, 80],
+            [0, 16, 24, 28, 32, 40, 48, 56, 64, 72, 80, 88, 96, 112, 128],
+        ],
+        [
+            [0, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160],
+            [0, 16, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192],
+            [0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224],
+        ],
+    ];
+
+    // Preserve original behavior for valid inputs, but avoid panics on short slices.
+    let b1 = h.get(1).copied().unwrap_or(0);
+    let b2 = h.get(2).copied().unwrap_or(0);
+
+    let table = ((b1 & 0x08) != 0) as usize;
+
+    // Original expression: ((h[1] >> 1 & 3) - 1)
+    // In the original code, this is computed in signed int space and then cast to usize.
+    // For invalid layer_bits (0), it underflows to -1, which becomes a huge usize and
+    // would be UB/panic in Rust indexing; we clamp to 0 for safety.
+    let layer_bits = ((b1 >> 1) & 0x03) as i32;
+    let layer = if layer_bits >= 1 && layer_bits <= 3 {
+        (layer_bits - 1) as usize
+    } else {
+        0
+    };
+
+    // Original expression: (h[2] >> 4) used directly as an index.
+    // Valid indices are 0..=14; clamp to 0 on invalid values to avoid panics.
+    let idx = (b2 >> 4) as usize;
+    let idx = if idx < 15 { idx } else { 0 };
+
+    let half = HALFRATE[table][layer][idx] as u32;
+    half * 2
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hdr_bitrate(h: *const u8) -> u32 {
+    hdr_bitrate_internal(if h.is_null() {
+        &[]
+    } else {
+        std::slice::from_raw_parts(h, 1024)
+    })
+}
+```
+
+**Entity:** hdr_bitrate (extern "C" API) / hdr_bitrate_internal input header
+
+**States:** InvalidPointerOrTooShort, ValidHeaderBytes
+
+**Transitions:**
+- InvalidPointerOrTooShort -> ValidHeaderBytes via caller providing valid non-null buffer and correct header encoding
+
+**Evidence:** hdr_bitrate: `pub unsafe extern "C" fn hdr_bitrate(h: *const u8) -> u32` raw pointer parameter indicates a caller-enforced precondition; hdr_bitrate: `if h.is_null() { &[] } else { std::slice::from_raw_parts(h, 1024) }` assumes non-null implies 1024 readable bytes; not checked; hdr_bitrate_internal: `let b1 = h.get(1).copied().unwrap_or(0); let b2 = h.get(2).copied().unwrap_or(0);` treats short slices as a special invalid state by substituting 0; hdr_bitrate_internal comments: "avoid panics on short slices", "clamp to 0 for safety", and "Valid indices are 0..=14; clamp to 0 on invalid values" describe implicit validity ranges and the fact they are not encoded in types
+
+**Implementation:** Introduce a validated input type such as `struct MpegHeader<'a>(&'a [u8; 4]);` (or larger fixed-size) with `TryFrom<&[u8]>` that checks required length and bitfield ranges (layer_bits 1..=3, idx 0..=14, etc.). Expose a safe API `fn bitrate(h: MpegHeader<'_>) -> u32`. For FFI, provide `unsafe fn hdr_bitrate_ptr(h: NonNull<u8>)` plus a separate safe wrapper that requires a `&[u8]`/`&[u8; N]` from Rust, keeping the raw-pointer precondition isolated.
+
+---
+

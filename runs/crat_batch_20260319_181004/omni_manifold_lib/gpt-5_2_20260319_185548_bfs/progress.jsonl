@@ -1,0 +1,14 @@
+{"module_path":"crate#1","status":"completed","invariants_found":1,"tokens_used":3007,"timestamp":"2026-03-19T18:55:56.218786205+00:00","error":null}
+{"module_path":"crate#0","status":"completed","invariants_found":0,"tokens_used":2472,"timestamp":"2026-03-19T18:55:57.071913038+00:00","error":null}
+{"module_path":"crate#2","status":"completed","invariants_found":0,"tokens_used":2487,"timestamp":"2026-03-19T18:55:57.918295343+00:00","error":null}
+{"module_path":"crate#3","status":"completed","invariants_found":1,"tokens_used":2927,"timestamp":"2026-03-19T18:56:04.950000990+00:00","error":null}
+{"module_path":"crate#5","status":"completed","invariants_found":0,"tokens_used":2509,"timestamp":"2026-03-19T18:56:05.822052104+00:00","error":null}
+{"module_path":"crate#6","status":"completed","invariants_found":0,"tokens_used":2474,"timestamp":"2026-03-19T18:56:06.564077508+00:00","error":null}
+{"module_path":"crate#7","status":"completed","invariants_found":0,"tokens_used":2472,"timestamp":"2026-03-19T18:56:07.575849885+00:00","error":null}
+{"module_path":"crate#8","status":"completed","invariants_found":1,"tokens_used":3142,"timestamp":"2026-03-19T18:56:19.094532086+00:00","error":null}
+{"module_path":"crate#9","status":"completed","invariants_found":0,"tokens_used":2513,"timestamp":"2026-03-19T18:56:19.926870713+00:00","error":null}
+{"module_path":"crate#10","status":"completed","invariants_found":1,"tokens_used":2992,"timestamp":"2026-03-19T18:56:27.968174087+00:00","error":null}
+{"module_path":"crate#11","status":"completed","invariants_found":1,"tokens_used":2965,"timestamp":"2026-03-19T18:56:35.628148379+00:00","error":null}
+{"module_path":"crate#12","status":"completed","invariants_found":0,"tokens_used":2479,"timestamp":"2026-03-19T18:56:36.334186909+00:00","error":null}
+{"module_path":"crate#13","status":"completed","invariants_found":3,"tokens_used":11026,"timestamp":"2026-03-19T18:57:11.327273824+00:00","error":null}
+{"module_path":"crate#4","status":"completed","invariants_found":1,"tokens_used":2869,"timestamp":"2026-03-19T18:57:18.401628230+00:00","error":null}

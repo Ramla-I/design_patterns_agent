@@ -1,0 +1,6 @@
+{"module_path":"crate#0","status":"completed","invariants_found":0,"tokens_used":2416,"timestamp":"2026-03-19T18:28:15.841217112+00:00","error":null}
+{"module_path":"crate#1","status":"completed","invariants_found":1,"tokens_used":2855,"timestamp":"2026-03-19T18:28:23.990874677+00:00","error":null}
+{"module_path":"crate#2","status":"completed","invariants_found":0,"tokens_used":2418,"timestamp":"2026-03-19T18:28:24.843762036+00:00","error":null}
+{"module_path":"crate#3","status":"completed","invariants_found":0,"tokens_used":2416,"timestamp":"2026-03-19T18:28:25.594127901+00:00","error":null}
+{"module_path":"crate#5","status":"completed","invariants_found":2,"tokens_used":11978,"timestamp":"2026-03-19T18:28:40.260951551+00:00","error":null}
+{"module_path":"crate#4","status":"completed","invariants_found":0,"tokens_used":2417,"timestamp":"2026-03-19T18:28:40.917649686+00:00","error":null}

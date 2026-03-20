@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "cached_tokens": 4992,
+    "input_tokens": 10460,
+    "output_tokens": 2877,
+    "reasoning_tokens": 0,
+    "total_tokens": 13337
+  },
+  "grand_total_tokens": 13337,
+  "validator": {
+    "cached_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "total_tokens": 0
+  }
+}

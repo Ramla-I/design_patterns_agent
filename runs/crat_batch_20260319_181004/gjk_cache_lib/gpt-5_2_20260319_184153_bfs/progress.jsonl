@@ -1,0 +1,10 @@
+{"module_path":"crate#0","status":"completed","invariants_found":0,"tokens_used":2438,"timestamp":"2026-03-19T18:41:54.577749087+00:00","error":null}
+{"module_path":"crate#1","status":"completed","invariants_found":0,"tokens_used":2438,"timestamp":"2026-03-19T18:41:55.207886763+00:00","error":null}
+{"module_path":"crate#2","status":"completed","invariants_found":0,"tokens_used":2440,"timestamp":"2026-03-19T18:41:56.256161372+00:00","error":null}
+{"module_path":"crate#3","status":"completed","invariants_found":0,"tokens_used":2445,"timestamp":"2026-03-19T18:41:57.221718339+00:00","error":null}
+{"module_path":"crate#4","status":"completed","invariants_found":1,"tokens_used":2815,"timestamp":"2026-03-19T18:42:02.467172751+00:00","error":null}
+{"module_path":"crate#5","status":"completed","invariants_found":0,"tokens_used":2453,"timestamp":"2026-03-19T18:42:03.381790810+00:00","error":null}
+{"module_path":"crate#7","status":"completed","invariants_found":1,"tokens_used":2897,"timestamp":"2026-03-19T18:42:10.669658863+00:00","error":null}
+{"module_path":"crate#8","status":"completed","invariants_found":0,"tokens_used":2479,"timestamp":"2026-03-19T18:42:11.468395112+00:00","error":null}
+{"module_path":"crate#9","status":"completed","invariants_found":1,"tokens_used":3049,"timestamp":"2026-03-19T18:42:21.597686454+00:00","error":null}
+{"module_path":"crate#6","status":"completed","invariants_found":1,"tokens_used":2980,"timestamp":"2026-03-19T18:42:30.786983756+00:00","error":null}

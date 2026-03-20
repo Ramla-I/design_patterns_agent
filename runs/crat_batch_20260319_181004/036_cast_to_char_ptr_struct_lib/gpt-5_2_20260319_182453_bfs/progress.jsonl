@@ -1,0 +1,2 @@
+{"module_path":"crate#0","status":"completed","invariants_found":0,"tokens_used":2381,"timestamp":"2026-03-19T18:24:53.988022984+00:00","error":null}
+{"module_path":"crate#1","status":"completed","invariants_found":2,"tokens_used":3383,"timestamp":"2026-03-19T18:25:06.298414893+00:00","error":null}
